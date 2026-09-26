@@ -1,0 +1,1358 @@
+       借助 Lex 和 Yacc 进行词法语法分析
+一、     实验目的：
+
+   1． 通过对实验型程序设计语言 C1 的定义，掌握程序设计语言的基本语法和语义；
+
+   2． 使用 Lex 及 Yacc 实现词法分析和语法分析；
+
+
+二、     实验内容：
+
+C1文法
+   这里定义了一个编程语言称作C1，这是一种适合编译器设计方案的语言，包括函数和数
+组。本质上它是C的一个子集，但省去了一些重要的部分，因此得名。
+
+
+C1惯用的词法
+1. 下面是语言的关键字：
+   else if int return void while
+   所有的关键字都是保留字，并且必须是小写。
+2. 下面是专用符号：
+   + - * / < <= > >= == != = ; , ( ) [ ] { } /* */
+3. 其他标记是ID 和NUM ，通过下列正则表达式定义：
+   ID = letter letter*
+   NUM = digit digit*
+   letter = a|..|z|A|..|Z
+   digit = 0|..|9
+   小写和大写字母是有区别的。
+4. 空格由空白、换行符和制表符组成。空格通常被忽略，除了它必须分开ID、NUM 关键字。
+5. 注释用通常的C语言符号/* . . . */围起来。注释可以放在任何空白出现的位置(即注释
+不能放在标记内)上，且可以超过一行。注释不能嵌套。
+
+
+C1的语法和语义
+
+
+1. program   →   declaration-list
+2. declaration-list → declaration-list   declaration | declaration
+3. declaration → var-declaration | fun-declaration
+4. var-declaration → type-specifier ID ; | type-specifier ID [ NUM ] ;
+5. type-specifier → int | void | float
+6. fun-declaration → type-specifier ID(params)   compound-stmt
+7. params → params-list | void
+8. param-list → param-list,param | param
+9. param → type-specifier ID| type-specifier ID[]
+10. compound-stmt → { local-declarations statement-list }
+11. local-declarations → local-declarations var-declaration | empty
+12. statement-list → statement-liststatement | empty
+13. statement → expression-stmt | compound-stmt | selection-stmt
+                 | iteration-stmt | return-stmt
+14. expression-stmt → expression;|;
+15. selection-stmt → if (expression) statement
+                        | if (expression) statement else statement
+16. iteration-stmt → while (expression) statement
+17. return-stmt → return; | return expression;
+18. expression → var = expression | simple-expression
+19. var → ID | ID[expression]
+20. simple-expression   →    additive-expression   relop   additive-expression   |
+additive-expression
+21. relop → <= | < | > | >= | = = | != | && | ||
+22. additive-expression → additive-expression addop term | term
+23. addop → + | -
+24. term → term mulopfactor | factor
+25. mulop → * | /
+26. factor → (expression) | var | call | NUM
+27. call → ID (args)
+28. args → arg-list |empty
+29. arg-list → arg-list,expression | expression
+
+
+
+
+下面是对以上每条文法规则，给出了相关语义的简短解释。
+1.program → declaration-list
+2.declaration-list → declaration-list declaration | declaration
+3.declaration → var-declaration | fun-declaration
+程序由声明的列表(或序列)组成，声明可以是函数或变量声明，顺序是任意的。至少必须有
+一个声明。接下来是语义限制(这些在C中不会出现)。所有的变量和函数在使用前必须声明
+(这避免了向后backpatching引用)。程序中最后的声明必须是一个函数声明，名字为main。
+注意，C1缺乏原型，因此声明和定义之间没有区别(像C一样)。
+4.var-declaration → type-specifier ID ; | type-specifier ID[NUM];
+5.type-specifier → int | void | float
+变量声明或者声明了简单的整数或浮点类型变量，或者是基类型为整数或浮点的数组变量，
+索引范围从0到NUM-1。注意，在C1中仅有的基本类型是整型和空类型。在一个变量声明中，
+只能使用类型指示符int。void用于函数声明(参见下面)。也要注意，每个声明只能声明一
+个变量。
+6.fun-declaration → type-specifier ID(params) compound-stmt
+7.params → param-list | void
+8.param-list → param-list , param | param
+9.param → type-specifier ID |type-specifier ID[]
+函数声明由返回类型指示符、标识符以及在圆括号内的用逗号分开的参数列表组成，后面跟
+着一个复合语句，是函数的代码。如果函数的返回类型是void，那么函数不返回任何值(即
+是一个过程)。函数的参数可以是void(即没有参数)，或者一列描述函数的参数。参数后面
+跟着方括号是数组参数，其大小是可变的。简单的整型参数由值传递。数组参数由引用来传
+递(也就是指针)，在调用时必须通过数组变量来匹配。注意，类型“函数”没有参数。一个
+函数参数的作用域等于函数声明的复合语句，函数的每次请求都有一个独立的参数集。函数
+可以是递归的(对于使用声明允许的范围)。
+10.compound-stmt → { local-declarations statement-list }
+复合语句由用花括号围起来的一组声明和语句组成。复合语句通过用给定的顺序执行语句序
+列来执行。局部声明的作用域等于复合语句的语句列表，并代替任何全局声明。
+11.local-declarations → local-declarations var-declaration | empty
+12.statement-list → statement-list statement | empty
+注意声明和语句列表都可以是空的(非终结符empty表示空字符串，有时写作ε。)
+13.statement → expression-stmt
+               | compound-stmt
+               | selection-stmt
+               | iteration-stmt
+               | return-stmt
+14.expression-stmt → expression; | ;
+表达式语句有一个可选的且后面跟着分号的表达式。这样的表达式通常求出它们一方的结
+果。因此，这个语句用于赋值和函数调用。
+15.selection-stmt → if (expression) statement
+                     | if (expression) statement else statement
+if语句有通常的语义：表达式进行计算；非0值引起第一条语句的执行；0值引起第二条语句
+的执行，如果它存在的话。这个规则导致了典型的悬挂else二义性，可以用一种标准的方法
+解决：else部分通常作为当前if的一个子结构立即分析(“最近嵌套”非二义性规则)。
+16.iteration-stmt → while (expression) statement
+while语句是C－中唯一的重复语句。它重复执行表达式，并且如果表达式的求值为非0，则
+执行语句，当表达式的值为0时结束。
+17.return-stmt → return; | return expression ;
+返回语句可以返回一个值也可无值返回。函数没有说明为void就必须返回一个值。函数声明
+为void就没有返回值。return引起控制返回调用者(如果它在main中，则程序结束)。
+18.expression → var=expression | simple-expression
+19.var→ ID | ID[expression]
+表达式是一个变量引用，后面跟着赋值符号(等号)和一个表达式，或者就是一个简单的表达
+式。赋值有通常的存储语义：找到由var表示的变量的地址，然后由赋值符右边的子表达式
+进行求值，子表达式的值存储到给定的地址。这个值也作为整个表达式的值返回。var是简
+单的(整型)变量或下标数组变量。负的下标将引起程序停止(与C不同)。然而，不进行下标
+越界检查。
+var表示C1比C的进一步限制。在C中赋值的目标必须是左值(l-value)，左值是可以由许多操
+作获得的地址。在C1中唯一的左值是由var语法给定的，因此这个种类按照句法进行检查，
+代替像C中那样的类型检查。故在C1中指针运算是禁止的。
+20.simple-expression → additive-expression relop additive-expression
+                         |additive-expression
+21.relop → <= | < | > | >= | == | != | && | ||
+简单表达式由无结合的关系操作符组成(即无括号的表达式仅有一个关系操作符)。简单表达
+式在它不包含关系操作符时，其值是加法表达式的值，或者如果关系算式求值为ture，其值
+为1，求值为false时值为0。
+22.additive-expression → additive-expression addop term | term
+23.addop → + | -
+24.term → term mulop factor | factor
+25.mulop → * | /
+加法表达式和项表示了算术操作符的结合性和优先级。/符号表示整数除；即任何余数都被
+截去。
+26.factor → (expression) | var | call | NUM
+因子是围在括号内的表达式；或一个变量，求出其变量的值；或者一个函数调用，求出函数
+的返回值；或者一个NUM，其值由扫描器计算。数组变量必须是下标变量，除非表达式由单
+个ID组成，并且以数组为参数在函数调用中使用(如下所示)。
+27.call → ID(args)
+28.args → arg-list | empty
+29.arg-list → arg-list,expression | expression
+函数调用的组成是一个ID(函数名)，后面是用括号围起来的参数。参数或者为空，或者由逗
+号分割的表达式列表组成，表示在一次调用期间分配的参数的值。函数在调用之前必须声明，
+声明中参数的数目必须等于调用中参数的数目。函数声明中的数组参数必须和一个表达式匹
+配，这个表达式由一个标识符组成表示一个数组变量。
+
+
+三、     实验要求：
+
+   1． 编写 LEX 和 YACC 源文件，实现 C1 语言的词法分析和语言分析功能，最后上机调试
+      通过。
+   2． 通过现场测试验收；要求编写一个测试程序，以给定的测试文件作为输入，输出运
+      行结果到输出文件中，由老师现场检查打分；
+   3． 实验报告按照提供的模板填写：
+        a) 功能描述：该程序具有什么功能？
+        b) 程序结构描述：函数调用格式、参数含义、返回值描述、函数功能；另外
+           可以附加函数之间的调用关系图、程序总体执行流程图。
+        c) 实验总结：你在编程过程中花时多少？多少时间在纸上设计？多少时间上
+           机输入和调试？多少时间在思考问题？遇到了哪些难题？你是怎么克服
+           的？你对你的程序的评价？你的收获有哪些；
+
+
+四、      评判标准：
+
+   1. 输出正确的实验结果；
+   2. 代码清晰，格式良好；
+   3. 提交的报告内容完整，层次清楚，结论正确；
+
+
+五、      程序工作说明：（以 C1 语言为例）
+
+   1. 用 BNF 或 EBNF 等形式给出 C1 语法的描述；
+   2. 编写 LEX 源文件，如 C1.l；
+   3. 用文本编辑器编辑相应的 flex 和 bison 文件 C1.l 和 C1.y；
+   4. 运行 flex 生成 lex.yy.c 文件；
+   5. 运行 bison 生成 myyacc.tab.c 和 myyacc.tab.h 文件；
+   6. 编写其他相关文件 other.c，others.h（按具体情况而定）            ；
+   7. 在 Windows 的 VC++ 开 发 环 境 下 ， 新 建 一 个 工 程 ， 将 以 上 文 件 ： lex.yy.c ，
+      myyacc.tab.c，myyacc.tab.h，other.c，others.h 添加到工程中去，然后编译和
+      连接，生成可执行文件 C1.exe；
+   8. 在命令行模式下运行可执行文件，输入源程序（以命令行或文本方式），检查其正
+      确性。
+
+
+
+
+==================================完=================================
+
+
+
+六、      相关知识：
+
+  关于 lex 与 yacc 的相关文章和书籍现在慢慢的多起来了，网上可以搜到不少。这里选
+了两篇比较简明的给大家作为参考，看完之后应该对 lex 与 yacc 的文档结构有所了解了。
+其中部分地方做了标注：
+
+第一篇：以网页形式保存（<<yacc 与 Lex 快速入门>>）
+    本文比较基本，但整个过程框架已经比较清楚了。应重点看
+
+第二篇：《使用 yacc 和 lex 编写文本分析器》
+                          ，原文比较长就直接粘过来了
+  本文讲的相对复杂一点。有了第一篇的基础后较为深入的可以看这篇。重点侧重在例子，
+我们在后面的练习中有可能用到。
+   本文将研究使用 lex/flex 和 yacc/bison 工具构建分析器所需的步骤。首先构建一个简单的计算
+器，然后深入地研究如何采用相同的原则进行文本分析。分析文本，即理解和提取文本中的关键部分，是
+许多应用程序中一个重要的部分。在 UNIX® 中，许多操作系统组成部分都依赖于文本分析，从用来与系
+统进行交互的 shell，到诸如 awk or Perl 等各种常用的工具和命令，再到用来构建软件和应用程序的 C
+编译器。您可以在 UNIX 应用程序（以及其他的应用程序）中使用分析器来构建简单的配置分析器，甚至
+构建最终的目标：您自己的编程语言。
+
+开始之前
+UNIX® 程序员常常发现他们需要去理解文本和其他一些具有灵活的标准化格式的结构。通过使用 lex 和
+yacc 工具，您可以构建一个分析引擎，根据特定的规则来处理文本。然后，可以将它集成到您的应用程
+序中以完成各项工作，从配置分析到构建您自己的编程语言。在学习了本教程之后，您将了解如何定义词
+法元素、编写 yacc 规则，并使用相应的规则机制来构建和定义各种不同的分析引擎和应用程序。
+关于本教程
+在 UNIX 中，有许多用来理解和提取文本的方法。您可以使用 grep、awk、Perl 和其他的解决方案。
+但有的时候，您需要理解和提取结构化的但格式不受限制的数据。在这种情况下，UNIX lex 和 yacc 工
+具就很有用处了。前面提到的那些工具，如 awk、Perl 以及 shell 和许多其他的编程语言，都使用 lex
+和 yacc 来生成分析应用程序以分析和理解文本，并将其转换为所需的信息或数据结构。
+Lex 是一种词法分析工具，它可以用来从源文本识别特定结构的文本字符串。Yacc 是一种语法分析器，
+它可以读取文本并用来将单词序列转换为便于处理的结构化的格式。
+在本教程中，首先您将研究如何使用 lex 和 yacc 来构建一个计算器。使用该计算器作为示例，您将进
+一步研究 lex 和 yacc 系统生成的输出和信息，并学习如何使用它来分析其他类型的信息。
+
+使用 lex 进行词法分析
+编写文本分析器的第一步是要能够识别所读取的内容。有许多不同的方法可以完成这项任务，但是最简单
+的方法是使用 lex，它是将输入信息转换为一系列标记的工具。
+什么是词法分析？
+当使用编程语言编写程序或在命令行中输入命令时，您是否想过究竟执行了什么操作将您输入的内容转换
+为一组指令呢？
+这个处理过程非常简单，却又相当复杂。它很复杂，这是因为对于可能输入的信息，表面上看起来似乎存
+在无限种可能的组合和序列。例如，要使用 Perl 语言遍历一个哈希表，您可以使用如清单 1 所示的序列。
+
+
+清单 1. 在 Perl 中遍历一个哈希表
+
+
+
+foreach $key (keys %hash)
+{
+...
+}
+其中的每一项都是有意义的，虽然方式有所不同，这正是该处理过程的简单明了之处。清单 1 中所示的表
+达式存在一个对应的结构，也就是说，与人类语言一样，编程语言中也存在着特定的规则。因此，如果将
+输入分解为您所看到的和该信息结构的组合，那么对该内容的分析过程则相当简单。
+要理解提供给文本分析应用程序的信息，通常有两个阶段。第一个阶段是识别输入的或提供给应用程序的
+内容是什么。您必须能够从输入源中识别关键字、短语或字符序列，以便能够确定对其进行何种处理。第
+二个处理阶段是理解该信息的结构，即语法，以便对输入进行验证和操作。有关语法的一个很好的示例是，
+大多数编程语言中圆括号的使用。很明显，下面的表达式是错误的：
+
+{ function)( {
+
+
+其中，大括号不匹配，而圆括号的出现顺序错误。为了让分析器理解和识别表达式，那么分析器必须知道
+正确的序列，以及匹配该序列后应该进行何种操作。
+词法分析首先进行识别输入数据的处理，并且可以使用 lex 工具来完成该处理过程。
+
+
+
+
+                                                  回页首
+
+
+
+
+lex 工具
+lex 工具（或 GNU 工具 flex）使用一个配置文件来生成相应的 C 源代码，然后，可以用它来创建独立
+的应用程序，或者在您自己的应用程序中使用它。配置文件定义了需要在待分析的文件中查找的字符序列，
+以及当发现该序列之后应该进行什么操作。该文件的格式十分简单，即指定输入序列和相应的结果，用空
+格（或制表符）隔开。例如：
+
+sequence do-something
+
+
+清单 2 显示了一个非常简单的定义，它可以接受单词并根据提供的单词打印出一个字符串。
+
+
+清单 2. 简单的 lex 定义
+
+
+
+%{
+#include <stdio.h>
+%}
+
+%%
+begin printf("Started\n");
+hello printf("Hello yourself!\n");
+thanks printf("Your welcome\n");
+end   printf("Stopped\n");
+%%
+代码中的第一块由 %{...%} 定义，表示将其中的文本插入到生成的 C 源代码中。在本示例中，因为后
+面使用了 printf() 函数，所以必须确保包含了 stdio.h Header。
+代码中的第二块由 %% 序列标识，其中包含了要识别的字符串输入和相应结果的定义。在上述的这些情况
+下，对于一个简单的单词，将打印出合适的响应。
+
+
+
+
+                                                       回页首
+
+
+
+
+生成 C 源代码
+要生成能够真正分析输入文本的 C 源代码，可以对清单 1 所示的文件运行 lex（或 flex）。Lex/flex 文
+件点号后缀为 'l'，所以上面的文件可能名为 exampleA.l。要生成相应的 C 源代码：
+
+$ flex exampleA.l
+
+
+不管您使用哪种工具，其输出都将为 lex.yy.c。缺乏勇气的人往往不敢仔细研究这个文件，分析器内部的
+处理过程的确非常复杂，并且建立在基于表格的复杂分析系统的基础上，该系统可以根据原始 lex 定义中
+的定义对输入文本进行匹配。因为存在这样的关联，所以该代码相当占用内存，特别是对于那些很大且很
+复杂的文件。
+与 lex 相比，flex 的优点在于它提供了大量附加的选项以改进性能（针对内存或速度）、调试选项和对
+扫描器行为更好的控制（例如，可以忽略某些情况）。在生成 C 源代码时，通过使用 -l 命令行选项，您
+可以生成与原始的 lex 工具生成的源代码非常接近的 C 源代码。
+既然已经有了 C 源代码，那么您可以将其编译为相应的应用程序以测试该处理过程：
+
+$ gcc -o exampleA lex.yy.c -lfl
+
+
+flex 库（使用 -lfl 进行包含，而 lex 则使用 -ll）包含执行分析代码的简单的 main() 函数。当
+运行生成的应用程序时，它将等待输入。清单 3 显示了该应用程序的输入（和输出）。
+
+
+清单 3. 简单 lex 应用程序的输入/输出
+
+
+
+$ exampleA
+begin
+Started
+
+hello
+Hello yourself!
+
+end
+Stopped
+thanks
+Your welcome
+
+hello thanks
+Hello yourself!
+ Your welcome
+
+hello Robert
+Hello yourself!
+ Robert
+
+
+对于单行输入 ('begin')，该应用程序根据您所提供的命令进行响应，在本示例中，将打印出单词
+'Started'。对于包含多个识别单词的行，该应用程序分别运行多个命令，并以空格隔开。对于无法识别的
+标记（包括空白字符），仅对其进行回显。
+这个示例介绍了该系统的基本操作，但是您仅仅使用了标准的单词。要使用其他的组合，如字符和元素，
+有各种不同的解决方案可供使用。
+
+
+
+
+                                                   回页首
+
+
+
+
+识别元素
+可识别的元素可以不是前面介绍的固定字符串，标识符支持正则表达式和特殊（例如标点符号）字符，如
+清单 4 所示。
+
+
+清单 4. 正则表达式和特殊字符
+
+
+
+%{
+#include <stdio.h>
+%}
+
+%%
+[a-z]   printf("Lowercase word\n");
+[A-Z]   printf("Uppercase word\n");
+[a-ZA-Z] printf("Word\n");
+[0-9]   printf("Integer\n");
+[0-9.] printf("Float\n");
+";"     printf("Semicolon\n");
+"("     printf("Open parentheses\n");
+")"     printf("Close parentheses\n");
+%%
+
+
+清单 4 中的示例应该是一目了然的，并且对于需要进行分析的任何正则表达式或特殊字符都可以使用相同
+的原则。
+
+
+
+
+                                                  回页首
+
+
+
+
+真正的标记化
+前面的示例所构建的 C 源代码实质上是独立的。尽管使用这种方法没有什么问题，但是对于分析包含多
+个单词、短语或序列的给定指令中的文本或其他条目的情况，这种方法并不是很有价值。
+使用这种方式分析序列需要一个语法分析器，而它将定义标记序列。但是语法分析器必须知道要分析的是
+什么标记。在 lex 定义中，当识别标记时所进行的操作是回显字符串，如果要返回一个识别标记，那么需
+要对该操作进行更改。例如，您可以如清单 5 所示对原始示例进行重写。
+
+
+清单 5. 返回标记
+
+
+
+%{
+#include <stdio.h>
+#include <y.tab.h>
+%}
+
+%%
+begin return BEGIN;
+hello return HELLO;
+thanks return THANKS;
+end   return END;
+%%
+
+
+现在，当识别了 'hello' 标记时，不再是打印一个字符串，而是返回标记的名称。在 yacc 中，将使用这
+个名称来建立相应的语法。
+在这个示例中，没有显式地定义这些标记名称。实际上是在 y.tab.h 文件中指定了这些标记名称，而在分
+析 yacc 语法文件时由 yacc 自动生成该文件。
+                                                  回页首
+
+
+
+提取变量数据
+如果要提取一个值（例如，需要能够读取一个数值或字符串），那么您必须指定如何将输入转换为所需的
+类型。通常由于 lex 中的各种限制，这种做法并不是很有价值，但是当使用 yacc 工具来构建一个完整
+的分析器时，这是至关重要的。
+通常可以使用两个变量来交换信息，yytext 变量包含了在分析过程中由 lex 读取的原始数据，而
+yylval 则用于在两个系统之间交换实际的值。在本教程后面的内容中，将更详细地介绍这种结合是如何
+进行的，但是出于识别信息的目的，您可能使用类似下面的 lex 定义：
+
+[0-9]   yylval=atoi(yytext); return NUMBER;
+
+
+在上面的代码行中，使用了标准的 atoi() 函数将匹配正则表达式（并保存于 yytext 中）的输入字
+符串片段转换为一个整数，并将 yylval 的值设置为该整数。请注意，尽管对值进行了转换，但您仍然
+需要返回值的类型，以便 yacc 知道究竟是什么类型并可以根据自己的定义来使用这个标记。
+让我们通过查看 yacc 如何定义语法结构，以此来了解这项工作是如何进行的。
+
+使用 yacc 进行语法分析
+语法定义用于定义标记序列以及应得到的结果。它通常与 lex 联合使用，由 lex 读取相应的文本，并且
+两者一同构成整个分析器。
+yacc 的基本语法
+yacc 语法定义的基本结构是定义预期的标记序列。例如，您可以定义表达式 A + B，其中 A 和 B 都是
+使用下列定义的数值：
+
+NUMBER PLUSTOKEN NUMBER
+{ printf("%f\n",($1+$3)); }
+
+
+NUMBER 是一个数值的识别标记，并且 PLUSTOKEN 是加号的识别标记。
+大括号中的代码定义了识别这个序列后进行何种操作，在本示例中，给出的是将这两个数值相加的 C 代
+码。请注意，使用命名法 $1 表示该语法表达式中的第一项标记，$3 表示其中的第三项。
+对于待识别的语法序列，您必须对序列进行命名，如清单 6 所示。
+
+
+清单 6. 对序列命名
+
+
+
+addexpr: NUMBER PLUSTOKEN NUMBER
+       {
+           printf("%f\n",($1+$3));
+       }
+       ;
+
+
+语法组的名称为 addexpr，并且这个组定义以一个分号作为结束。
+一个语法定义可以包含多个序列（以及相关的操作），而这些序列都是一个特殊的组中的一部分。例如在
+计算器中，加法和减法处理是类似的操作，所以可以将它们集中作为一组。一个组中不同的定义可以使用
+管道符号 (|) 进行分隔（请参见清单 7）。
+
+
+清单 7. 一个组中不同的定义使用管道符号进行分隔
+
+
+
+addexpr: NUMBER PLUSTOKEN NUMBER
+       {
+           printf("%f\n",($1+$3));
+       }
+       | NUMBER MINUSTOKEN NUMBER
+       {
+           printf("%f\n",($1-$3));
+       }
+       ;
+
+
+您已经了解了基本的语法规范，那么还需要了解如何组合多个序列以及它们的优先级。
+
+
+
+
+                                                     回页首
+
+
+
+
+语法序列和优先级
+在大多数语言中，无论是文本型、数学运算型，还是编程型的语言，通常对于不同的短语都有某种优先级
+或重要性，这将使得它们与类似的但不同的组合相比具有相应的优先权。
+例如，在大多数编程语言的数学运算表达式中，乘法具有比加法或减法更高的优先级。例如，表达式：4+5*6
+将计算为： 4+30。
+这将得到最终的计算结果 34。其原因是首先进行乘法操作（5 乘以 6 等于 30），然后将其结果用于最
+后的计算过程，即加上 4 后得到结果 34。
+在 yacc 中，通过定义多个语法序列组并将它们连接在一起，就可以定义相应的优先级，不同表达式在组
+中的顺序可以帮助定义其优先级。在清单 8 中，您可以看到用于定义上述行为的代码。
+
+
+清单 8. 连接语法并提供优先级
+
+
+
+add_expr: mul_expr
+       | add_expr PLUS mul_expr { $$ = $1 + $3; }
+       | add_expr MINUS mul_expr { $$ = $1 - $3; }
+       ;
+mul_expr: primary
+       | mul_expr MUL primary { $$ = $1 * $3; }
+       | mul_expr DIV primary { $$ = $1 / $3; }
+       ;
+primary: NUMBER { $$ = $1; }
+       ;
+
+
+yacc 执行所有表达式计算都是从左到右进行处理的，所以对于与原始示例类似的复合表达式（例如，
+4+5*6），yacc 将根据相应的规则查找最佳匹配，即与表达式中的一部分匹配。
+根据规则所定义的顺序，自上而下进行匹配处理。所以，该处理过程首先试图匹配 add_expr 中的语法
+规则。然而，因为乘法具有更高的优先级，所以这些规则表明 yacc 应该首先尝试 mul_expr。这将迫
+使 yacc 首先根据乘法语句进行匹配（在 mul_expr 中进行定义）。如果匹配失败，然后它将尝试
+add_expr 块中的下一条规则，依此类推，直到该表达式被解析，或者没能找到任何匹配并生成一个错
+误。
+当使用上述的规则集对公式 4+5*6 进行计算时，yacc 首先尝试 add_expr，然后被重定向到
+mul_expr（作为匹配的第一条规则），并且又被重定向到 primary。primary 规则设置了表达式中相
+应数字的值。$$ 有效地设置了那部分表达式的返回值。
+在匹配了这些数字之后，yacc 根据下面这行定义识别了一个乘法表达式：| mul_expr MUL primary
+{ $$ = $1 * $3; }，它设置了原始表达式中的 5*6 部分的返回值。Yacc 生成代码以执行相应的
+计算（提取前面由 primary 规则设置的值），并使用计算的结果值替换输入表达式的原始部分。这就意
+味着 yacc 现在需要匹配下面的表达式： 4+30。
+它可以使用下面的规则匹配这个表达式：| add_expr PLUS mul_expr { $$ = $1 + $3; }，
+这将最终计算出最后的结果 34。
+
+
+
+
+                                                        回页首
+
+
+
+
+彻底地研究语法定义
+语法定义设置了相应的规则，用于分析输入标记及其格式和布局，并将其转换为可以使用的信息。在任何
+时候都请记住，这里定义的规则集是告诉 yacc 如何识别输入并执行一段 C 代码。yacc 工具生成所需
+的 C 代码来分析该信息，而并不是由 yacc 来完成分析工作。
+大括号中的代码是 quasi-C 源代码。Yacc 根据您给出的定义将原始文件转换为相应的 C 源代码以及分
+析具体内容所需的其他的代码。
+除了定义如何分析输入内容的规则集之外，还有一些附加函数和选项用以帮助定义其他的 C 源代码。完
+整的 yacc 定义文件的基本格式类似与 lex/flex 所使用的格式，如下面的清单 9 所示。
+
+
+清单 9. Yacc 文件格式
+
+
+
+%{
+/* Global and header definitions required */
+%}
+
+/* Declarations (Optional token definitions) */
+
+%%
+/* Parsing ruleset definitions
+%%
+
+/* Additional C source code */
+
+
+全局/Header 定义与 lex/flex 文件中所使用的定义相同，如果您在分析和处理输出时使用了特殊的函
+数，那么它们都是必需的。
+标记定义不仅描述了预期的标记，还描述了分析处理过程中的优先级。通过迫使 yacc 按照特定的顺序检
+查标记，这可以调整 yacc 对规则的处理方式，并且还影响到在与规则进行比较时如何对表达式进行处理。
+例如，您通常可以定义 + 标记具有左优先级，也就是说，首先对这个标记左边的任何表达式进行匹配，
+这样一来，表达式 4+5+6 首先会计算 4+5，然后计算 9+6。
+然而，您可能希望为一些标记指定右优先级，例如，计算逻辑 NOT，（例如，! (expr)）您可能希望
+先计算 expr，然后对通过 ! 标记对其表达式的值取反。
+除了控制规则之间的优先级关系之外，还可以指定标记的优先级，这样您就可以精确地控制如何对输入进
+行计算。
+有三种主要的标记类型，%token（没有优先级差别），%left（标记左侧的输入具有优先级）和 %right
+（标记右侧的输入具有优先级）。例如，清单 10 根据适当的优先级定义了若干标记：
+
+
+清单 10. 根据适当的优先级定义若干标记
+
+
+
+%token EQUALS POWER
+%left PLUS MINUS
+%left MULTIPLY DIVIDE
+%right NOT
+
+
+请注意，以自上而下优先级递增的顺序指定标记的优先级，并且同一行中的标记具有相同的优先级。在清
+单 10 所示的示例中，MULTIPLY 和 DIVIDE 具有相同的优先级，该优先级要高于 PLUS 和 MINUS
+的优先级。
+请注意，如果在规则中使用这里没有定义的任何标记，则将引发一个错误。
+
+
+
+
+                                                       回页首
+自定义初始化和错误
+您将要定义的两个关键的函数是 main() 函数（可以将自定义的初始化和其他的处理放在这个函数中），
+以及 yyerror() 函数（当对于输入信息无法找到一条分析规则时将打印出一个错误）。由 yacc 生成
+的进行实际分析工作的函数称为 yyparse()。自定义函数的典型定义如清单 11 所示。
+
+
+清单 11. 分析器的自定义函数
+
+
+
+#include <stdio.h>
+#include <ctype.h>
+char *progname;
+double yylval;
+
+main( argc, argv )
+char *argv[];
+{
+  progname = argv[0];
+  yyparse();
+}
+
+yyerror( s )
+char *s;
+{
+   fprintf( stderr ,"%s: %s\n" , progname , s );
+}
+
+
+yyerror() 函数接受一个字符串，并且在引发错误的时候将其与程序名称合并在一起作为输出。
+
+
+
+
+                                                               回页首
+
+
+
+
+将语法编译为 C 代码
+Yacc（最初是 yet another compiler compiler 的缩写）和 GNU bison 工具都接受一个语法定义文件
+作为输入，并生成创建分析器所需的 C 源代码，而该分析器将对适当的输入进行处理。
+通常，语法定义文件的扩展名为 .y。
+当您运行 yacc 时，缺省情况下它将创建一个名为 yy.tab.c 的文件。如果 yacc 和 lex 一同使用，那
+么您还需要生成一个 C Header 文件，该文件包含了这两个系统中识别的标记的宏定义。除了 C 源代码
+之外，如果还要生成 Header 文件，可以使用 -d 命令行选项：
+
+$ yacc -d calcparser.y
+尽管 bison 可以执行相同的基本操作，但缺省情况下，它所生成的文件使用源文件名称的前缀作为其标
+识。所以，在上面的示例中，使用 bison 将生成 calcparser.tab.c 和 calcparser.tab.h 文件。
+这个区别是很重要的，不仅因为您需要知道究竟要编译那个文件，而且还因为您需要在 lex.l 定义中导入
+正确的 Header 文件，以便它能够读取正确的标记定义。
+当编译一个 lex/yacc 应用程序时，一般的过程如下：
+
+
+
+     1. 对分析器定义运行 yacc。
+
+     2. 对词法定义运行 lex。
+
+     3. 编译生成的 yacc 源文件。
+
+     4. 编译生成的 lex 源文件。
+
+     5. 编译任何其他的模块。
+
+     6. 将 lex、yacc 和其他源链接为一个可执行文件。
+
+我倾向于使用一个与清单 12 所示类似的 Makefile。（不了解 Makefile 写法的同学这里可以参看 Linux
+课课件的程序设计一章）
+
+
+清单 12. 简单的 lex/yacc Makefile
+
+
+
+YFLAGS         = -d
+
+PROGRAM        = calc
+
+OBJS           = calcparse.tab.o lex.yy.o fmath.o const.o
+
+SRCS           = calcparse.tab.c lex.yy.c fmath.c const.c
+
+CC            = gcc
+
+all:             $(PROGRAM)
+
+.c.o:            $(SRCS)
+                $(CC) -c $*.c -o $@ -O
+
+calcparse.tab.c:      calcparse.y
+             bison $(YFLAGS) calcparse.y
+
+lex.yy.c:         lex.l
+             flex lex.l
+
+calc:         $(OBJS)
+             $(CC) $(OBJS)   -o $@ -lfl -lm
+
+clean:;       rm -f $(OBJS) core *~ \#* *.o $(PROGRAM) \
+             y.* lex.yy.* calcparse.tab.*
+
+
+
+
+                                                     回页首
+
+
+
+
+与 lex 进行数据交换
+lex 和 yacc 之间数据交换的主要方法是当使用 yacc 创建 C 源代码和生成包含每个标记的 C 宏代码
+的 Header 文件时生成的标记定义。
+然而，如果您需要交换的数据不仅仅是一个标记，那么您必须设置一个可以包含需要交换的信息的值。
+这个处理过程分为两个阶段。首先，您应该根据具体需要定义 YYSTYPE。这是用于在这两个系统之间进
+行数据交换的缺省值。对于一个基本的计算器，您可能需要将其定义为整数（实际上这正是缺省的情况）、
+浮点数或双精度数。如果您需要交换文本，那么可以将它设置为一个字符指针或数组。如果需要同时交换
+这两种信息，那么您应该创建一个可以包含这两种值的联合结构。
+然后，您还应该在 yacc 和 lex 定义中声明 yylval 变量（和其他任何需要共享的变量）为该类型。
+例如，在这两个文件的 Header 块中，您需要指定这个类型（请参见清单 13）。
+
+
+清单 13. 指定具体的类型
+
+
+
+%{
+...
+#define YYSTYPE double
+...
+%}
+
+
+在 lex 定义中，您还需要将 yylval 变量定义为这个类型的外部变量：
+
+extern YYSTYPE yylval;
+
+
+最后，在 yacc 文件的自定义 C 初始化块中，您需要定义这个变量：
+
+YYSTYPE yylval;
+现在，您就可以在由这两个系统生成的 C 源代码中进行数据交换了。
+
+构建一个计算器
+您可以使用前面部分中演示的技术来构建一个常规表达式计算器。
+计算器的基本概念
+您可以构建一个能够处理表达式的程序，如清单 14 所示。
+
+
+清单 14. 能够处理表达式的程序
+
+
+
+4+5
+(4+5)*6
+2^3/6
+sin(1)+cos(PI)
+
+
+通过定义附加的标记和语法规则，您可以进一步扩展它的功能以包括各种函数和方程式，不仅仅是标准 C
+语言和数学库中的函数，您还可以自己进行特殊的定义。
+为了能够分析所有这些不同的元素，第一步需要定义可以由词法分析组件识别的标记。清单 15 给出了完
+整的 lex 定义。
+
+
+清单 15. 高级计算器的 Lex 文件
+
+
+
+%{
+#define YYSTYPE double
+#include "calcparse.tab.h"
+#include <math.h>
+extern double yylval;
+%}
+D      [0-9.]
+%%
+[ \t] { ; }
+log     return LOG;
+pi     return PIVAL;
+sin    return SIN;
+cos    return COS;
+tan    return TAN;
+and    return AND;
+not    return NOT;
+xor    return XOR;
+or     return OR;
+reg    return REGA;
+ans    return ANS;
+fix    return FIX;
+sci    return SCI;
+eng    return ENG;
+const return CONST;
+bintodec return BINTODEC;
+dectobin return DECTOBIN;
+{D}+   { sscanf( yytext, "%lf", &yylval ); return NUMBER ; }
+[a-zA-Z_]+ return IDENT;
+"["    return OPENREG;
+"]"    return CLOSEREG;
+"<<"   return LEFTSHIFT;
+">>"   return RIGHTSHIFT;
+"++"   return INC;
+"--"   return DEC;
+"+"    return PLUS;
+"-"    return MINUS;
+"~"    return UNARYMINUS;
+"/"    return DIV;
+"*"    return MUL;
+"^"    return POW;
+"!"    return FACT;
+"("    return OPENBRACKET;
+")"    return CLOSEBRACKET;
+"%"    return MOD;
+"^^"    return XOR;
+"!!"    return NOT;
+"="    return ASSIGN;
+"&&"   return LAND;
+"||"   return OR;
+"|"    return IOR;
+"&"    return AND;
+"~~"    return COMPLEMENT;
+"\n"   return EOLN;
+
+
+这里有大量的标记，其中许多都是自说明的。这些标记包括基本数学操作、大量的函数（sin、cos 等等）
+和逻辑运算符。另请注意，对于数值使用了双精度类型，使用 sscanf() 将数字字符串和小数点解析为
+适当的双精度值。
+
+
+
+
+                                                       回页首
+计算器语法
+根据前面部分中介绍的标记，存在大量的语法规则用于分析这些标记。语法分析器的完整代码如清单 16
+所示。让我们更仔细地看一下其中一些重要的部分以及该系统是如何工作的。
+
+
+清单 16. 计算器语法文件
+
+
+
+%{
+#include <alloca.h>
+#include <math.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <ctype.h>
+#define YYSTYPE double
+double calcfact();
+double reg[99];
+double ans;
+char format[20];
+%}
+
+%token NUMBER SPACE MOD RIGHTSHIFT LEFTSHIFT SEMICOLON SIN
+EOLN PIVAL
+%token PLUS MINUS DIV MUL POW OPENBRACKET CLOSEBRACKET
+UNARYMINUS
+%token COS TAN ASIN ACOS ATAN FACT INC DEC LAND OR COMPLEMENT
+%token NOT XOR ASSIGN IOR AND OPENREG CLOSEREG REGA ANS FIX
+SCI ENG
+%token CONST
+%left PLUS MINUS
+%left MUL DIV
+%left UNARYMINUS
+%left LAND OR XOR NOT AND IOR
+%left LOG
+%%
+list: /* nothing */
+       | list EOLN
+       | list expr EOLN
+         { printf( format , (double) $2 ); ans=$2; }
+       ;
+expr: conditional_expr
+       ;
+conditional_expr: logical_or_expr
+       ;
+logical_or_expr: logical_and_expr
+       | logical_or_expr OR logical_and_expr
+        { $$ = (int) $1 || (int) $3; }
+       ;
+logical_and_expr: inclusive_or_expr
+       | logical_and_expr LAND inclusive_or_expr
+         { $$ = (int) $1 && (int) $3; }
+       ;
+inclusive_or_expr: exclusive_or_expr
+       | inclusive_or_expr IOR exclusive_or_expr
+         { $$ = (int) $1 | (int) $3; }
+       ;
+exclusive_or_expr: and_expr
+       | exclusive_or_expr XOR and_expr
+         { $$ = (int) $1 ^ (int) $3; }
+       ;
+and_expr: shift_expr
+       | and_expr AND shift_expr
+         { $$ = (int) $1 & (int) $3; }
+       ;
+shift_expr: pow_expr
+       | shift_expr LEFTSHIFT pow_expr
+         { $$ = (int) $1 << (int) $3; }
+       | shift_expr RIGHTSHIFT pow_expr
+         { $$ = (int) $1 >>(int) $3; }
+       ;
+pow_expr: add_expr
+       | pow_expr POW add_expr { $$ = pow($1,$3); }
+       ;
+add_expr: mul_expr
+       | add_expr PLUS mul_expr { $$ = $1 + $3; }
+       | add_expr MINUS mul_expr { $$ = $1 - $3; }
+       ;
+mul_expr: unary_expr
+       | mul_expr MUL unary_expr { $$ = $1 * $3; }
+       | mul_expr DIV unary_expr { $$ = $1 / $3; }
+       | mul_expr MOD unary_expr { $$ = fmod($1,$3); }
+       ;
+unary_expr: assign_expr
+       | MINUS primary %prec UNARYMINUS { $$ = -$2; }
+       | INC unary_expr { $$ = $2+1; }
+       | DEC unary_expr { $$ = $2-1; }
+       | NOT unary_expr { $$ = !$2; }
+       | LOG unary_expr { $$ = log($2); }
+       ;
+assign_expr: postfix_expr
+       | REGA OPENREG expr CLOSEREG ASSIGN postfix_expr
+         { reg[(int)$3]=$6; $$=$6; }
+       | REGA OPENREG expr CLOSEREG
+         { $$=reg[(int)$3]; }
+       | REGA
+         { int i;
+           for(i=0;i<100;i++)
+             if (reg[i]!=0)
+               printf("%02d = %.2f\n",i,reg[i]);
+           $$=0;
+         }
+       ;
+postfix_expr: primary
+       | postfix_expr INC { $$ = $1+1; }
+       | postfix_expr DEC { $$ = $1-1; }
+       | postfix_expr FACT
+         { $$ = calcfact((unsigned long int)$1); }
+       ;
+ primary: NUMBER { $$ = $1; }
+       | PIVAL { $$ = M_PI; }
+       | OPENBRACKET expr CLOSEBRACKET { $$ = $2; }
+       | ANS { $$ = ans; }
+       | CONST OPENBRACKET expr CLOSEBRACKET { $$ =
+constval($3); }
+       | set_format
+       ;
+set_format: function_call
+       | FIX OPENBRACKET expr CLOSEBRACKET
+             { sprintf(format,"%%.%df\n",(int)$3); $$=0; }
+       | FIX { sprintf(format,"%%f\n"); $$=0; }
+       | SCI OPENBRACKET expr CLOSEBRACKET
+             { sprintf(format,"%%.%dg\n",(int)$3); $$=0; }
+       | SCI { sprintf(format,"%%g\n"); $$=0; }
+       | ENG OPENBRACKET expr CLOSEBRACKET
+             { sprintf(format,"%%.%de\n",(int)$3); $$=0; }
+       | ENG { sprintf(format,"%%e\n"); $$=0; }
+       ;
+function_call: SIN OPENBRACKET expr CLOSEBRACKET
+              { $$ = (cos($3)*tan($3)); }
+       | COS OPENBRACKET expr CLOSEBRACKET
+              { $$ = cos($3); }
+       | TAN OPENBRACKET expr CLOSEBRACKET
+              { $$ = tan($3); }
+       | ASIN OPENBRACKET expr CLOSEBRACKET
+                { $$ = asin($3); }
+          | ACOS OPENBRACKET expr CLOSEBRACKET
+                { $$ = acos($3); }
+          | ATAN OPENBRACKET expr CLOSEBRACKET
+                { $$ = atan($3); }
+          ;
+%%
+
+#include <stdio.h>
+#include <ctype.h>
+char *progname;
+double yylval;
+
+main( argc, argv )
+char *argv[];
+{
+  progname = argv[0];
+  strcpy(format,"%g\n");
+  yyparse();
+}
+
+yyerror( s )
+char *s;
+{
+  warning( s , ( char * )0 );
+  yyparse();
+}
+
+warning( s , t )
+char *s , *t;
+{
+  fprintf( stderr ,"%s: %s\n" , progname , s );
+  if ( t )
+    fprintf( stderr , " %s\n" , t );
+}
+
+
+对于应用程序中其他的部分，有三个全局结构可供使用：
+
+
+     •   reg 数组用作通用存储寄存器，可以在其中存放计算过程的值和结果。
+     •   ans 变量包含上次计算的值。
+     •   format 用于保存打印结果时所使用的输出格式。
+仅当输入中包含行结束字符（以 EOLN 标记进行标识）时，才打印出计算结果。这样就可以在单行中输
+入很长的计算式，并且在对相应的内容进行了分析和处理后，再打印出结果值。这项操作使用全局 format
+变量所指定的格式，并且将结果存储在 ans 中。
+分析器的主要部分是识别片段并计算结果的组合，直到最后将比较复杂的计算过程中不同的部分解析为最
+终的值。
+
+
+
+
+                                              回页首
+
+
+
+
+设置输出格式
+格式就是用于 printf() 的一个合适的格式字符串，可以通过使用函数方式的调用来设置输出的精度和
+格式。例如，要设置固定小数点的输出以限制小数点右边的数字，您可以使用 fix(3)，或者可以重新设
+置缺省格式： fix()。
+在清单 17 的序列中，您可以看到相应的效果。
+
+
+清单 17. 输出格式
+
+
+
+$ calc
+1/3
+0.333333
+fix(3)
+0.000
+1/3
+0.333
+
+
+因为该格式字符串是全局的，并且仅由一条规则来打印出结果，这就意味着您可以很容易地使用该格式字
+符串来控制输出。
+
+
+
+
+                                              回页首
+
+
+
+
+计算器寄存器
+寄存器实际上是一个浮点值数组，可以通过使用一个数值引用来访问该数组。这部分代码中的分析工作由
+清单 18 中所示的代码片段完成。
+清单 18. 计算器中的寄存器
+
+
+
+assign_expr: postfix_expr
+       | REGA OPENREG expr CLOSEREG ASSIGN postfix_expr
+         { reg[(int)$3]=$6; $$=$6; }
+       | REGA OPENREG expr CLOSEREG
+         { $$=reg[(int)$3]; }
+       | REGA
+         { int i;
+           for(i=0;i<100;i++)
+             if (reg[i]!=0)
+               printf("%02d = %.2f\n",i,reg[i]);
+           $$=0;
+         }
+       ;
+
+
+第一条规则允许进行赋值，并且该分析器允许使用表达式对寄存器进行引用，但对于相应的值只能使用
+postfix_expr。这将限制所能够对寄存器指定的值，如清单 19 中的序列所示。
+
+清单 19. 限制能够对寄存器指定的值
+
+
+
+reg[0]=26
+26
+reg[0]
+26
+reg[1]=(4+5)*sin(1)
+7.57324
+reg[1]
+9
+reg[4+5]=29
+29
+reg[9]
+29
+
+
+请注意，中间的表达式 (4+5)*sin(1) 返回正确的结果，但仅将该表达式开始部分的值赋给了寄存器。
+这是因为该规则仅允许使用匹配 postfix_assign 规则的表达式进行赋值，并且实际上由 primary
+规则最终描述带圆括号的语句的规则。因为不允许将整行输入作为赋值的一部分，所以分析器匹配了第一
+个片段 ((4+5)) 并将这个值赋给了寄存器。因为对寄存器赋值时返回了寄存器的值，所以其他的计算过
+程可以继续进行并打印出正确的结果。
+有一个简单的解决方案可以处理这个问题。作为一条简单的输入规则，您需要使用圆括号将对寄存器的赋
+值语句括起来：
+reg[1]=((4+5)*sin(1))
+
+
+这并不需要对相应的规则进行任何更改，因为在现有的分析器中可以使用上面的方法，但可能需要对文档
+进行相应的更改。
+当前的系统还有一个优点，那就是您可以同时对下一个寄存器赋值。这是因为对寄存器赋值时会返回该寄
+存器的结果。因此，下面的序列可以正常工作（请参见清单 20）。
+
+
+清单 20. 寄存器的结果
+
+
+
+reg[1]=(45+reg[2]=(3+4))
+52
+reg[1]
+52
+reg[2]
+7
+
+扩展 lex 和 yacc 的原则
+这个计算器演示了一些基本处理，但是关于 lex 和 yacc 工具以及如何使用它们，还有很多的内容。
+使用计算器分析器
+因为分析输入信息的规则和对信息的处理可以单独地进行设置和控制，所以实际上可以独立地改变信息提
+取和处理的方式。
+当我第一次接触 lex 和 yacc 时，我的初始目标是构建一个逆波兰表示法 (RPN) 计算器。使用 RPN，
+您需要首先提供相应的数值，然后是运算符，例如，要将两个数值相加在一起，您应该使用： 4 5 +。
+对于有些人来说，这种序列更有意义，特别是当您希望编写出与学校里学到的加法运算相同的计算过程时：
+
+4
+5 +
+----
+9
+----
+
+
+对于更加复杂的计算过程，您可以将数值载入到堆栈中，然后使用相应的参数，即自动地放回到堆栈中的
+计算结果。4+5*6 可以编写为： 4 5 6 * +。
+对于计算机来说，这种表示方式更加直截了当。您可以使用堆栈来实现 RPN 计算器。当分析器识别了一
+个数值，会将它压入堆栈，并且当发现了一个运算符时，从堆栈中弹出相应的值，然后执行计算过程。它
+简化了在执行常规表达式分析中所需的大量的处理和复杂的分析过程。
+然而，再增加一点点工作，您就可以创建一个将常规表达式输入转换为 RPN 的分析器。甚至更加完善，
+您还可以将 RPN 转换为标准的表达式格式。
+例如，将表达式转换为 RPN：
+
+$ equtorpn
+4+5*6
+4 5 6 * +
+其中有趣的是，分析规则中定义的优先级顺序（其 yacc 分析器是这里所介绍的计算器的简化版本）将产
+生满足上述示例的 RPN。
+您可以将 equtorpn 工具的输出作为 RPN 计算器的输入，并获得相同的结果：
+
+$ equtorpn|rpn
+4+5*6
+34
+
+
+有关 rpn、equtorpn 和 rpntoequ 应用程序的完整示例和代码及其工作方式的更详细的讨论，请访问
+MCslp Coalface Web 站点（请参见参考资料）。
+
+
+
+
+                                                       回页首
+
+
+
+
+进行适当的文本分析
+这些示例介绍了如何构建一个表达式分析器，而该分析器可以将数学表达式转换为可以进行计算的表达式。
+该分析器说明了序列、分析规则和诸如优先级之类的问题的重要性。在文本处理系统中也可以应用相同的
+规则，但是处理文本可能更加复杂，除非您建立与计算器示例中同样严格的强制规则。
+清单 21 显示了创建简单的 set/get 状态分析器的 lex 文件，而清单 22 显示了分析其输出的 yacc
+规则。
+
+
+清单 21. 使用 lex 进行基于文本的标记化
+
+
+
+%{
+#include <stdio.h>
+#include "text.tab.h"
+%}
+
+%%
+set      return SET;
+state    return STATE;
+mode     return MODE;
+get      return GET;
+[a-zA-Z]+ { yylval=strdup(yytext); return STRING; }
+%%
+
+
+
+清单 22. 分析文本的 yacc 规则
+%{
+#include <stdlib.h>
+#define YYSTYPE char *
+char mode[20];
+char state[20];
+%}
+
+%token SET STATE MODE GET STRING EOLN
+%%
+list: /* nothing */
+       | list getorset
+       ;
+getorset: getvalue
+        | setvalue
+        ;
+setvalue:
+       SET STATE STRING { strcpy(state,$3); printf("State
+set\n"); }
+       | SET MODE STRING { strcpy(mode,$3); printf("Mode
+set\n"); }
+       ;
+getvalue:
+       GET STATE { printf("State: %s\n",state); }
+       | GET MODE { printf("Mode: %s\n",mode); }
+       ;
+
+%%
+
+#include <stdio.h>
+#include <ctype.ha>
+char *progname;
+
+main( argc, argv )
+char *argv[];
+{
+  progname = argv[0];
+  yyparse();
+}
+
+yyerror( s )
+char *s;
+{
+  fprintf( stderr ,"%s: %s\n" , progname , s );
+}
+
+
+在计算器示例中，必须将输入文本转换为一个数值，而这个示例与计算器示例有所不同，您可以直接使用
+输入字符串，而无需进行转换（请参见清单 23）。
+
+
+清单 23. 直接使用输入字符串
+
+
+
+$ textparser
+get state
+ State:
+
+set state bob
+  State set
+
+get state
+ State: bob
+
+
+更加复杂的文本分析器也都构建于相同的基本原则，并且可用于完成各种任务，从配置文件分析器，到构
+建您自己的脚本语言，甚至是可进行编译的语言。
+
+
+
+
+                                                       回页首
+
+
+
+
+语言编译器
+语言编译器（例如 C 编译器）可以接受您的输入，并将输入转换为指定的目标平台的原始汇编语言。这
+就解释了为什么最初的编译器都是特定于体系结构的，为什么编写一个为可选的平台生成代码的编译器（交
+叉编译）相当容易。编译器仅为可选的平台生成汇编代码。例如，要将两个数值相加到一起，您可以对前
+面使用的规则集进行更改，以便生成如下所示的 Intel x86 汇编代码：
+
+add_expr: mul_expr
+       | add_expr PLUS mul_expr
+         { printf("MOV ax,%d\nADD ax,%d\n",$1,$3); }
+
+
+为了使汇编转换处理过程能够构建完整的语言，可以将其他的结构（如循环、递归、函数、变量名称和其
+他的元素）添加到该系统中。
+
+总结
+    通过 lex 和 yacc 的组合，您可以生成构建分析器的代码。lex 工具提供了识别文本片段和元素的
+方法，并可以返回相应的标记。yacc 工具可以使用一系列描述输入格式的规则来处理这些标记组成的结
+构，并且定义了处理识别的序列的方法。在这两种情况下，这些工具都使用了一个配置文件，在生成构建
+合适的分析应用程序的 C 源代码时将对该文件进行处理。
+在本教程中，您看到了关于如何使用这些应用程序为计算器应用程序构建简单的分析器的示例。通过这些
+处理，您了解了标记化、规则集的重要性，以及规则集如何互相作用以提供完整的分析解决方案。您了解
+了如何使用这些基本原则进行其他的处理，如文本分析器、甚至是构建您自己的编程语言。
+
+
+
+
+   看到这里不知道你是否已经对 Lex 与 Yacc 比较了解了呢？ftp 的内容中同时还有《lex
+与 yacc》第二版的中文版。该书是少有的讲 lex 和 yacc 的书，比较经典。
+  http://dinosaur.compilertools.net/ 是一个 lex 和 yacc 及相关资料的网
+站。就作业而言不看也罢（英文的且为国外网）。从扩展角度可能会用到。
+
+
+
+七、     参考书目：
+
+  1.   Kenneth C. Louden 著，冯博琴译《编译原理及实践》，机械工业出版社，
+       2000 年
+  2.   Andrew W.Appel 著，赵克佳等译《现代编译原理 C 语言描述》人民邮电
+       出版社，2006 年
+  3.   陈火旺，刘春林等，《程序设计语言编译原理》第三版，国防科大出版
+       社，2001 年
+  4.   John R.Levine,Tony Mason,Doug Brown 著，杨作梅等译，《Lex 与 Yacc
+       （第二版）》，机械工业出版社，2003 年
+  5.   王雷等著，《编译原理课程设计》，机械工业出版社，2005
+  6.   Lex 与 yacc 快速入门.pdf
+  7.   Lex 与 yacc.pdf
+  8.   flex 和 bison 工具附带的文档说明
+

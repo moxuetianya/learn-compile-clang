@@ -1,0 +1,71 @@
+Program
+  FunDecl int sum(...) (line 2)
+    Compound (line 2)
+      VarDecl int i (line 3)
+      VarDecl int s (line 3)
+      ExprStmt
+        Assign
+          Var i
+          Num 0
+      ExprStmt
+        Assign
+          Var s
+          Num 0
+      While
+        BinOp <
+          Var i
+          Var n
+        Compound (line 6)
+          ExprStmt
+            Assign
+              Var s
+              BinOp +
+                Var s
+                Var a[
+                  Var i
+                 ]
+          ExprStmt
+            Assign
+              Var i
+              BinOp +
+                Var i
+                Num 1
+      Return
+        Var s
+  FunDecl int main(...) (line 12)
+    Compound (line 12)
+      VarDecl int arr[5] (line 13)
+      ExprStmt
+        Assign
+          Var arr[
+            Num 0
+           ]
+          Num 1
+      ExprStmt
+        Assign
+          Var arr[
+            Num 1
+           ]
+          Num 2
+      ExprStmt
+        Assign
+          Var arr[
+            Num 2
+           ]
+          Num 3
+      ExprStmt
+        Assign
+          Var arr[
+            Num 3
+           ]
+          Num 4
+      ExprStmt
+        Assign
+          Var arr[
+            Num 4
+           ]
+          Num 5
+      Return
+        Call sum
+          Var arr
+          Num 5

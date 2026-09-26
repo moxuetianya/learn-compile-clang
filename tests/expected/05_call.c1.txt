@@ -1,0 +1,13 @@
+Program
+  FunDecl int add(...) (line 2)
+    Compound (line 2)
+      Return
+        BinOp +
+          Var a
+          Var b
+  FunDecl int main(...) (line 5)
+    Compound (line 5)
+      Return
+        Call add
+          Num 40
+          Num 2

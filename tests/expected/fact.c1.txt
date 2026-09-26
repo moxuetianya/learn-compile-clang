@@ -1,0 +1,21 @@
+Program
+  FunDecl int fact(...) (line 2)
+    Compound (line 2)
+      If
+        BinOp <
+          Var n
+          Num 2
+        Return
+          Num 1
+      Return
+        BinOp *
+          Var n
+          Call fact
+            BinOp -
+              Var n
+              Num 1
+  FunDecl int main(...) (line 6)
+    Compound (line 6)
+      Return
+        Call fact
+          Num 5

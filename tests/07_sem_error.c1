@@ -1,0 +1,7 @@
+/* 语义错误测试 */
+int x;
+int main() {
+    y = 1;        /* y 未声明 */
+    foo(1, 2);    /* foo 未定义 */
+    return x;
+}

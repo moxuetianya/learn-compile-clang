@@ -1,0 +1,4 @@
+/* 没有 main 函数 */
+int helper(int x) {
+    return x + 1;
+}

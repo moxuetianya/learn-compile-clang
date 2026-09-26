@@ -1,0 +1,24 @@
+Program
+  FunDecl int fib(...) (line 2)
+    Compound (line 2)
+      If
+        BinOp <
+          Var n
+          Num 2
+        Return
+          Var n
+      Return
+        BinOp +
+          Call fib
+            BinOp -
+              Var n
+              Num 1
+          Call fib
+            BinOp -
+              Var n
+              Num 2
+  FunDecl int main(...) (line 6)
+    Compound (line 6)
+      Return
+        Call fib
+          Num 10

@@ -1,0 +1,16 @@
+Program
+  FunDecl int main(...) (line 2)
+    Compound (line 2)
+      VarDecl int x (line 3)
+      ExprStmt
+        Assign
+          Var x
+          BinOp *
+            BinOp +
+              Num 1
+              Num 2
+            BinOp +
+              Num 3
+              Num 4
+      Return
+        Var x

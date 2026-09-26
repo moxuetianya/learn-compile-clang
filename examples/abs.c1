@@ -1,0 +1,12 @@
+/* 绝对值 + 控制流 */
+int abs(int x) {
+    if (x < 0) return 0 - x;
+    return x;
+}
+int main() {
+    int a; int b;
+    a = -42;
+    b = abs(a);
+    if (b == 42) return b;
+    return 0;
+}

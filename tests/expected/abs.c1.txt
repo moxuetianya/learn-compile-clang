@@ -1,0 +1,36 @@
+Program
+  FunDecl int abs(...) (line 2)
+    Compound (line 2)
+      If
+        BinOp <
+          Var x
+          Num 0
+        Return
+          BinOp -
+            Num 0
+            Var x
+      Return
+        Var x
+  FunDecl int main(...) (line 6)
+    Compound (line 6)
+      VarDecl int a (line 7)
+      VarDecl int b (line 7)
+      ExprStmt
+        Assign
+          Var a
+          BinOp -
+            Num 0
+            Num 42
+      ExprStmt
+        Assign
+          Var b
+          Call abs
+            Var a
+      If
+        BinOp ==
+          Var b
+          Num 42
+        Return
+          Var b
+      Return
+        Num 0

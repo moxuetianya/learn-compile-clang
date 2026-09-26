@@ -1,0 +1,43 @@
+Program
+  FunDecl int main(...) (line 2)
+    Compound (line 2)
+      VarDecl int a[5] (line 3)
+      VarDecl int i (line 4)
+      VarDecl int s (line 5)
+      ExprStmt
+        Assign
+          Var i
+          Num 0
+      ExprStmt
+        Assign
+          Var s
+          Num 0
+      While
+        BinOp <
+          Var i
+          Num 5
+        Compound (line 8)
+          ExprStmt
+            Assign
+              Var a[
+                Var i
+               ]
+              BinOp *
+                Var i
+                Num 2
+          ExprStmt
+            Assign
+              Var s
+              BinOp +
+                Var s
+                Var a[
+                  Var i
+                 ]
+          ExprStmt
+            Assign
+              Var i
+              BinOp +
+                Var i
+                Num 1
+      Return
+        Var s

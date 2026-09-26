@@ -1,0 +1,7 @@
+/* 测试 5：函数调用 */
+int add(int a, int b) {
+    return a + b;
+}
+int main() {
+    return add(40, 2);
+}
