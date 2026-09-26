@@ -1,0 +1,18 @@
+/* 测试 12：双分支 return / return 后死代码 —— 曾生成非法 IR 的场景 */
+int pick(int x) {
+    if (x > 0)
+        return 1;
+    else
+        return 2;
+    x = 99;                          /* 不可达: if.end 块无前驱但必须可终结 */
+}
+int mid(int x) {
+    if (x > 0) return x;
+    return 0 - x;
+    x = 7;                           /* return 之后的死代码 */
+}
+int main() {
+    int a;
+    a = pick(5) + pick(0 - 1);       /* 1 + 2 */
+    return a + mid(0 - 9);           /* 3 + 9 = 12 */
+}

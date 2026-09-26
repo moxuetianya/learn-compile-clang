@@ -1,12 +1,24 @@
 /*
- * 教学版 codegen —— 直接打印 LLVM IR 文本
+ * 教学版 codegen —— 直接打印 LLVM IR 文本（第 9 章）
  *
- * 不依赖 LLVM C++ API —— 让 c1c 在最小环境下也能产出可执行文件。
- * 第 9-10 章的 LLVM C++ API 版本会替换这里。
+ * 不依赖 LLVM C++ API：先学会"IR 长什么样"，第 9-10 章的 LLVM C++ API
+ * 版本（src/codegen/llvm_codegen.cpp）做同样的事情，只是用 IRBuilder。
  *
- * 编译: gcc ... codegen.c ast.c ... -o build/c1c_emit
+ * 编译: make c1c_emit
  * 运行: ./build/c1c_emit < fib.c1 > fib.ll
- *       llc-18 fib.ll -o fib.s && clang-18 fib.s -o fib && ./fib
+ *       llc-18 fib.ll -filetype=obj -o fib.o && clang-18 fib.o -o fib && ./fib
+ *
+ * ── IR 生成要点（和教程章节对应）──────────────────────────────
+ *  1. 所有局部变量/参数都住在 alloca 槽里（"可变内存"），
+ *     表达式求值结果才用 SSA 临时寄存器 %tN —— 这就是mem2reg 之前
+ *     clang -O0 生成 IR 的样子。
+ *  2. if/while 靠基本块 + br 跳转；每块末尾恰好一条终结指令
+ *     （ret/br）。已经发射终结指令后绝不能再发第二条 —— 这是初学
+ *     者最常犯的 IR 错误，用 terminated 标志防止。
+ *  3. && / || 是短路求值：结果用 phi 节点把两条路径汇合。
+ *  4. 数组：局部/全局数组是 [N x i32] 槽，取元素用两级 GEP；
+ *     数组参数传进来的是指针，先 load 再一级 GEP。
+ *  5. LLVM 15+ 使用 opaque pointer（统一写作 ptr），不再区分 i32*。
  */
 
 #include <stdio.h>
@@ -15,290 +27,504 @@
 #include "ast.h"
 #include "tokens.h"
 
-/* ---------- SSA value 管理 ---------- */
+/* ---------- 值的表示 ----------
+ * gen_expr 返回一个字符串，两种形态：
+ *   "%t3"  —— SSA 临时寄存器名
+ *   "42"   —— 字面常量（不再为常量生成 add i32 5, 0 这种废指令）
+ * 字符串经 strdup / 环形缓冲分配，存活到函数结束，可放心延迟使用。
+ */
+static int next_tmp;              /* 每个函数重置，名字只需函数内唯一 */
 
-#define MAX_VALS 4096
-
-typedef struct {
-    char *name;       /* "%t1", "%t2" ... */
-} Val;
-
-static Val vals[MAX_VALS];
-static int  n_vals = 0;
-static int  next_tmp = 0;
+#define NBUF 8
+static char constbuf[NBUF][24];
+static int  constidx;
+static const char *const_name(int v) {
+    char *b = constbuf[constidx++ % NBUF];
+    snprintf(b, 24, "%d", v);
+    return b;
+}
 
 static const char *fresh(void) {
-    static char buf[32];
-    snprintf(buf, sizeof(buf), "%%t%d", next_tmp++);
-    return strdup(buf);
+    char buf[32];
+    snprintf(buf, sizeof buf, "%%t%d", next_tmp++);
+    return strdup(buf);           /* 教学版：不回收，进程退出即释放 */
 }
 
-static void push(const char *name) {
-    vals[n_vals].name = strdup(name);
-    n_vals++;
-}
+/* 描述 gen_expr 刚产出的值的类别，供调用方决定 IR 类型 */
+static int last_is_i1;            /* 布尔值（icmp/phi 的结果） */
+static int last_is_ptr;           /* 指针（数组裸用） */
 
-static const char *pop(void) {
-    if (n_vals == 0) return "%0";
-    n_vals--;
-    return vals[n_vals].name;
-}
+/* ---------- 名字 → 槽 绑定 ----------
+ * B_SCALAR:   alloca i32 的槽，用 load/store 访问
+ * B_ARRAY:    alloca [N x i32] 或全局数组，槽本身是数组首地址
+ * B_ARRPARAM: alloca ptr 的槽，里面存着调用者传来的数组指针
+ */
+typedef enum { B_SCALAR, B_ARRAY, B_ARRPARAM } BindKind;
 
-static const char *top(void) {
-    if (n_vals == 0) return "%0";
-    return vals[n_vals - 1].name;
-}
-
-/* 名字 → alloca 槽映射 (局部变量、参数) */
 typedef struct {
-    char *name;
-    const char *slot;
+    char     *name;
+    char     *slot;               /* "%t3" 或 "@g_x" */
+    BindKind  kind;
+    int       arr_size;
 } Binding;
 
-#define MAX_BIND 256
-static Binding bindings[MAX_BIND];
-static int      n_bind = 0;
+#define MAX_BIND 512
+static Binding locals_[MAX_BIND];  static int n_locals;
+static Binding globals_[MAX_BIND]; static int n_globals;
 
-static void bind(const char *name, const char *slot) {
-    bindings[n_bind].name = strdup(name);
-    bindings[n_bind].slot = strdup(slot);
-    n_bind++;
+static void bind_local(const char *name, const char *slot, BindKind k, int n) {
+    Binding *b = &locals_[n_locals++];
+    b->name = strdup(name); b->slot = strdup(slot);
+    b->kind = k; b->arr_size = n;
 }
-
-static const char *lookup(const char *name) {
-    for (int i = n_bind - 1; i >= 0; i--)
-        if (!strcmp(bindings[i].name, name)) return bindings[i].slot;
+static void bind_global(const char *name, const char *slot, BindKind k, int n) {
+    Binding *b = &globals_[n_globals++];
+    b->name = strdup(name); b->slot = strdup(slot);
+    b->kind = k; b->arr_size = n;
+}
+static Binding *lookup(const char *name) {
+    for (int i = n_locals - 1; i >= 0; i--)
+        if (!strcmp(locals_[i].name, name)) return &locals_[i];
+    for (int i = n_globals - 1; i >= 0; i--)
+        if (!strcmp(globals_[i].name, name)) return &globals_[i];
     return NULL;
 }
 
-/* ---------- 主入口 ---------- */
+/* ---------- 函数返回类型表（调用点需要知道 call 的类型） ---------- */
+#define MAX_FUNS 256
+static struct { char *name; int is_void; } funs[MAX_FUNS];
+static int n_funs;
 
-static void gen_decl(ASTNode *d);
+static int fun_is_void(const char *name) {
+    for (int i = 0; i < n_funs; i++)
+        if (!strcmp(funs[i].name, name)) return funs[i].is_void;
+    return 0;                     /* 未声明函数按 int 处理（sema 已拦截） */
+}
+
+/* ---------- 基本块状态 ----------
+ * terminated: 当前块是否已发射终结指令（ret / br）。
+ *   终结之后再发 br/ret 就是非法 IR —— if 分支里带 return 的经典坑。
+ * cur_blk: 当前块标签，phi 节点要引用"前驱块名"。
+ */
+static int  terminated;
+static char cur_blk[64];
+static int  label_id;
+
+static void emit_label(const char *name) {
+    printf("%s:\n", name);
+    snprintf(cur_blk, sizeof cur_blk, "%s", name);
+    terminated = 0;               /* 新块从"未终结"开始 */
+}
+static void br_to(const char *target) {
+    if (terminated) return;       /* 块已终结：这条 br 是死代码，跳过 */
+    printf("  br label %%%s\n", target);
+    terminated = 1;
+}
+
+/* 把 i32 值转成 i1 条件：非 0 即真 */
+static const char *to_cond(const char *v) {
+    if (last_is_i1) return v;     /* 本来就是 icmp/phi 的结果 */
+    const char *r = fresh();
+    printf("  %s = icmp ne i32 %s, 0\n", r, v);
+    return r;
+}
+
+/* ---------- 前向声明 ---------- */
+static void   gen_decl(ASTNode *d);
 static const char *gen_expr(ASTNode *e);
-static void gen_stmt(ASTNode *s, int *ret_seen);
+static const char *gen_addr(ASTNode *var);   /* var[index] 的地址 */
+static void   gen_stmt(ASTNode *s, int is_void_fun);
+
+/* ---------- 主入口 ---------- */
 
 void gen_program(ASTNode *p) {
     printf("; generated by c1c (textual IR emitter)\n");
-    printf("source_filename = \"c1c-output\"\n");
-    printf("target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n");
-    printf("target triple = \"x86_64-unknown-linux-gnu\"\n\n");
-    printf("declare i32 @printf(i8*, ...)\n");
-    printf("@.str.0 = constant [4 x i8] c\"%%d\\0A\\00\"\n\n");
+    printf("target triple = \"%s\"\n\n",
+#ifdef __x86_64__
+           "x86_64-unknown-linux-gnu"
+#else
+           "unknown-unknown-linux"
+#endif
+           );
 
+    /* 预扫描：登记所有函数的返回类型（调用点要用） */
+    for (int i = 0; i < p->u.program.n; i++) {
+        ASTNode *d = p->u.program.decls[i];
+        if (d->kind == AST_FUN_DECL && n_funs < MAX_FUNS) {
+            funs[n_funs].name = strdup(d->u.fun_decl.name);
+            funs[n_funs].is_void = (d->u.fun_decl.ret_type == T_VOID);
+            n_funs++;
+        }
+    }
+
+    /* 先输出所有全局变量 */
+    for (int i = 0; i < p->u.program.n; i++) {
+        ASTNode *d = p->u.program.decls[i];
+        if (d->kind != AST_VAR_DECL) continue;
+        char gslot[64];
+        snprintf(gslot, sizeof gslot, "@g_%s", d->u.var_decl.name);
+        if (d->u.var_decl.array_size) {
+            printf("@g_%s = global [%d x i32] zeroinitializer\n",
+                   d->u.var_decl.name, d->u.var_decl.array_size);
+            bind_global(d->u.var_decl.name, gslot, B_ARRAY, d->u.var_decl.array_size);
+        } else {
+            printf("@g_%s = global i32 0\n", d->u.var_decl.name);
+            bind_global(d->u.var_decl.name, gslot, B_SCALAR, 0);
+        }
+    }
+    if (n_globals) printf("\n");
+
+    /* 再输出所有函数 */
     for (int i = 0; i < p->u.program.n; i++)
         gen_decl(p->u.program.decls[i]);
 }
 
-static void gen_decl(ASTNode *d) {
-    if (d->kind == AST_VAR_DECL) {
-        if (d->u.var_decl.array_size)
-            printf("@g_%s = global [%d x i32] zeroinitializer\n",
-                   d->u.var_decl.name, d->u.var_decl.array_size);
-        else
-            printf("@g_%s = global i32 0\n", d->u.var_decl.name);
-        printf("\n");
-        return;
+/* ---------- 声明 ---------- */
+
+static void gen_fun(ASTNode *d) {
+    int is_void = (d->u.fun_decl.ret_type == T_VOID);
+
+    n_locals = 0;
+    next_tmp = 1;
+
+    printf("define %s @%s(", is_void ? "void" : "i32", d->u.fun_decl.name);
+    for (int i = 0; i < d->u.fun_decl.n_params; i++) {
+        ASTNode *pp = d->u.fun_decl.params[i];
+        if (i) printf(", ");
+        printf("%s %%p_%s", pp->u.param.is_array ? "ptr" : "i32",
+               pp->u.param.name);
     }
-    if (d->kind == AST_FUN_DECL) {
-        n_vals = 0;
-        n_bind = 0;
-        next_tmp = 1;
+    printf(") {\nentry:\n");
+    snprintf(cur_blk, sizeof cur_blk, "entry");
+    terminated = 0;
 
-        printf("define i32 @%s(", d->u.fun_decl.name);
-        /* 参数: 在 entry 里 alloca, 然后 store */
-        int n_params = d->u.fun_decl.n_params;
-        for (int i = 0; i < n_params; i++) {
-            ASTNode *p = d->u.fun_decl.params[i];
-            if (i) printf(", ");
-            if (p->u.param.is_array)
-                printf("i32*");
-            else
-                printf("i32");
+    /* 参数: 入口处 alloca 一个槽, 把形参 store 进去 */
+    for (int i = 0; i < d->u.fun_decl.n_params; i++) {
+        ASTNode *pp = d->u.fun_decl.params[i];
+        const char *slot = fresh();
+        if (pp->u.param.is_array) {
+            printf("  %s = alloca ptr\n", slot);
+            printf("  store ptr %%p_%s, ptr %s\n", pp->u.param.name, slot);
+            bind_local(pp->u.param.name, slot, B_ARRPARAM, 0);
+        } else {
+            printf("  %s = alloca i32\n", slot);
+            printf("  store i32 %%p_%s, ptr %s\n", pp->u.param.name, slot);
+            bind_local(pp->u.param.name, slot, B_SCALAR, 0);
         }
-        printf(") {\nentry:\n");
+    }
 
-        /* 局部变量的 alloca */
-        /* 先把参数 alloca + store */
-        for (int i = 0; i < n_params; i++) {
-            ASTNode *p = d->u.fun_decl.params[i];
+    ASTNode *body = d->u.fun_decl.body;
+    if (body && body->kind == AST_COMPOUND) {
+        /* 函数体局部变量：集中在 entry 做 alloca（教学惯例，
+           对应 clang -O0 的输出形态；mem2reg 会把它们提升） */
+        for (int i = 0; i < body->u.compound.nd; i++) {
+            ASTNode *v = body->u.compound.decls[i];
+            if (v->kind != AST_VAR_DECL) continue;
             const char *slot = fresh();
-            if (p->u.param.is_array)
-                printf("  %s = alloca i32*\n", slot);
-            else
+            if (v->u.var_decl.array_size) {
+                printf("  %s = alloca [%d x i32]\n", slot, v->u.var_decl.array_size);
+                bind_local(v->u.var_decl.name, slot, B_ARRAY, v->u.var_decl.array_size);
+            } else {
                 printf("  %s = alloca i32\n", slot);
-            printf("  store i32 %%%d, i32* %s\n", i, slot);
-            bind(p->u.param.name, slot);
-        }
-
-        ASTNode *body = d->u.fun_decl.body;
-        if (body && body->kind == AST_COMPOUND) {
-            /* alloca 局部变量 */
-            for (int i = 0; i < body->u.compound.nd; i++) {
-                ASTNode *v = body->u.compound.decls[i];
-                if (v->kind != AST_VAR_DECL) continue;
-                const char *slot = fresh();
-                if (v->u.var_decl.array_size)
-                    printf("  %s = alloca [%d x i32]\n", slot, v->u.var_decl.array_size);
-                else
-                    printf("  %s = alloca i32\n", slot);
-                bind(v->u.var_decl.name, slot);
+                bind_local(v->u.var_decl.name, slot, B_SCALAR, 0);
             }
-
-            int ret_seen = 0;
-            for (int i = 0; i < body->u.compound.ns; i++)
-                gen_stmt(body->u.compound.stmts[i], &ret_seen);
-            if (!ret_seen) {
-                if (!strcmp(d->u.fun_decl.name, "main"))
-                    printf("  ret i32 0\n");
-                else
-                    printf("  ret i32 0\n");
-            }
-        } else if (body && body->kind == AST_RETURN) {
-            gen_stmt(body, (int*)0);
         }
-        printf("}\n\n");
+        for (int i = 0; i < body->u.compound.ns && !terminated; i++)
+            gen_stmt(body->u.compound.stmts[i], is_void);
     }
+
+    /* 兜底 return：保证每个函数最后一块有终结指令 */
+    if (!terminated)
+        printf("  ret %s\n", is_void ? "void" : "i32 0");
+    printf("}\n\n");
+}
+
+static void gen_decl(ASTNode *d) {
+    if (d->kind == AST_FUN_DECL) gen_fun(d);
+    /* 全局变量已在 gen_program 输出 */
+}
+
+/* ---------- 表达式 ---------- */
+
+static int tok_is(int op, int tk, int hw_tk) { return op == tk || op == hw_tk; }
+
+/* var[index] 的元素地址 */
+static const char *gen_addr(ASTNode *var) {
+    Binding *b = lookup(var->u.var.name);
+    if (!b) {
+        fprintf(stderr, "codegen: 未定义变量 %s (line %d)\n",
+                var->u.var.name, var->line);
+        return "undef";
+    }
+    const char *idx = gen_expr(var->u.var.index);
+    const char *p = fresh();
+    if (b->kind == B_ARRPARAM) {
+        /* 参数槽里存的是指针：先 load 出来，再一维 GEP */
+        const char *raw = fresh();
+        printf("  %s = load ptr, ptr %s\n", raw, b->slot);
+        printf("  %s = getelementptr i32, ptr %s, i32 %s\n", p, raw, idx);
+    } else if (b->kind == B_ARRAY) {
+        /* 槽指向整个数组 [N x i32]：两级 GEP（0 = 不动数组，idx = 走到元素） */
+        printf("  %s = getelementptr [%d x i32], ptr %s, i32 0, i32 %s\n",
+               p, b->arr_size, b->slot, idx);
+    } else {
+        fprintf(stderr, "codegen: 对非数组 %s 取下标 (line %d)\n",
+                var->u.var.name, var->line);
+    }
+    return p;
+}
+
+/* 短路求值：&& / ||。演示 phi 如何汇合两条路径的值 */
+static const char *gen_logical(ASTNode *e) {
+    int is_and = tok_is(e->u.binop.op, TK_AND, HW_TK_AND);
+    const char *l  = gen_expr(e->u.binop.lhs);
+    const char *lc = to_cond(l);
+    char pre[64];                       /* 左操作数求值所在的块（phi 前驱1） */
+    snprintf(pre, sizeof pre, "%s", cur_blk);
+
+    int id = label_id++;
+    char rhs_blk[32], end_blk[32];
+    snprintf(rhs_blk, sizeof rhs_blk, "%s.rhs%d", is_and ? "and" : "or", id);
+    snprintf(end_blk, sizeof end_blk, "%s.end%d", is_and ? "and" : "or", id);
+
+    /* &&: 假短路 —— 左边假直接跳 end（结果 0）；||: 真短路跳 end（结果 1） */
+    if (is_and)
+        printf("  br i1 %s, label %%%s, label %%%s\n", lc, rhs_blk, end_blk);
+    else
+        printf("  br i1 %s, label %%%s, label %%%s\n", lc, end_blk, rhs_blk);
+    terminated = 1;
+
+    emit_label(rhs_blk);
+    const char *r  = gen_expr(e->u.binop.rhs);
+    const char *rc = to_cond(r);
+    char pred2[64];                     /* 右操作数结束所在的块（phi 前驱2） */
+    snprintf(pred2, sizeof pred2, "%s", cur_blk);
+    br_to(end_blk);
+
+    emit_label(end_blk);
+    const char *phi = fresh();
+    printf("  %s = phi i1 [ %d, %%%s ], [ %s, %%%s ]\n",
+           phi, is_and ? 0 : 1, pre, rc, pred2);
+
+    const char *res = fresh();          /* C1 里逻辑运算结果是 int 0/1 */
+    printf("  %s = zext i1 %s to i32\n", res, phi);
+    return res;
 }
 
 static const char *binop_ir(int op) {
-    /* TK_PLUS / HW_TK_PLUS / PLUS 都能识别 */
-    if (op == '+' || op == TK_PLUS || op == HW_TK_PLUS) return "add";
-    if (op == '-' || op == TK_MINUS || op == HW_TK_MINUS) return "sub";
-    if (op == '*' || op == TK_MUL || op == HW_TK_MUL) return "mul";
-    if (op == '/' || op == TK_DIV || op == HW_TK_DIV) return "sdiv";
-    if (op == '<' || op == TK_LT || op == HW_TK_LT) return "icmp slt";
-    if (op == 'L' || op == TK_LE || op == HW_TK_LE) return "icmp sle";
-    if (op == '>' || op == TK_GT || op == HW_TK_GT) return "icmp sgt";
-    if (op == 'G' || op == TK_GE || op == HW_TK_GE) return "icmp sge";
-    if (op == 'E' || op == TK_EQ || op == HW_TK_EQ) return "icmp eq";
-    if (op == 'N' || op == TK_NEQ || op == HW_TK_NEQ) return "icmp ne";
-    return "?";
-}
-
-static int is_cmp(int op) {
-    return op == '<' || op == '>' || op == 'L' || op == 'G' ||
-           op == 'E' || op == 'N' ||
-           op == TK_LT || op == TK_LE || op == TK_GT || op == TK_GE ||
-           op == TK_EQ || op == TK_NEQ ||
-           op == HW_TK_LT || op == HW_TK_LE || op == HW_TK_GT || op == HW_TK_GE ||
-           op == HW_TK_EQ || op == HW_TK_NEQ;
+    if (tok_is(op, TK_PLUS,  HW_TK_PLUS))  return "add";
+    if (tok_is(op, TK_MINUS, HW_TK_MINUS)) return "sub";
+    if (tok_is(op, TK_MUL,   HW_TK_MUL))   return "mul";
+    if (tok_is(op, TK_DIV,   HW_TK_DIV))   return "sdiv";
+    if (tok_is(op, TK_LT,    HW_TK_LT))    return "icmp slt";
+    if (tok_is(op, TK_LE,    HW_TK_LE))    return "icmp sle";
+    if (tok_is(op, TK_GT,    HW_TK_GT))    return "icmp sgt";
+    if (tok_is(op, TK_GE,    HW_TK_GE))    return "icmp sge";
+    if (tok_is(op, TK_EQ,    HW_TK_EQ))    return "icmp eq";
+    if (tok_is(op, TK_NEQ,   HW_TK_NEQ))   return "icmp ne";
+    return NULL;                    /* && / || 由 gen_logical 单独处理 */
 }
 
 static const char *gen_expr(ASTNode *e) {
-    if (!e) return "%0";
+    last_is_i1 = last_is_ptr = 0;
+    if (!e) return const_name(0);
+
     switch (e->kind) {
-    case AST_NUM: {
-        const char *r = fresh();
-        printf("  %s = add i32 %d, 0\n", r, e->u.num.value);
-        return r;
-    }
+    case AST_NUM:
+        return const_name(e->u.num.value);      /* 常量直接用字面量 */
+
     case AST_VAR: {
-        const char *slot = lookup(e->u.var.name);
-        if (!slot) {
-            fprintf(stderr, "codegen: undefined variable %s\n", e->u.var.name);
-            return "%0";
+        Binding *b = lookup(e->u.var.name);
+        if (!b) {
+            fprintf(stderr, "codegen: 未定义变量 %s (line %d)\n",
+                    e->u.var.name, e->line);
+            return const_name(0);
         }
-        const char *r = fresh();
-        if (e->u.var.index) {
-            const char *idx = gen_expr(e->u.var.index);
-            printf("  %s = getelementptr i32, i32* %s, i32 %s\n", r, slot, idx);
-            printf("  %s = load i32, i32* %s\n", fresh(), r);
-            n_vals--; /* pop the GEP */
+        if (e->u.var.index) {                   /* a[i]：先取地址再 load */
+            const char *p = gen_addr(e);
+            const char *r = fresh();
+            printf("  %s = load i32, ptr %s\n", r, p);
             return r;
         }
-        /* slot 可能指向 i32* 或 [N x i32]* */
-        printf("  %s = load i32, i32* %s\n", r, slot);
-        return r;
+        if (b->kind == B_SCALAR) {
+            const char *r = fresh();
+            printf("  %s = load i32, ptr %s\n", r, b->slot);
+            return r;
+        }
+        if (b->kind == B_ARRPARAM) {            /* 形参数组：槽里 load 出指针 */
+            const char *r = fresh();
+            printf("  %s = load ptr, ptr %s\n", r, b->slot);
+            last_is_ptr = 1;
+            return r;
+        }
+        /* 局部/全局数组裸用：槽本身即首地址（数组退化为指针） */
+        last_is_ptr = 1;
+        return b->slot;
     }
+
     case AST_BINOP: {
+        if (tok_is(e->u.binop.op, TK_AND, HW_TK_AND) ||
+            tok_is(e->u.binop.op, TK_OR,  HW_TK_OR))
+            return gen_logical(e);
+
         const char *lhs = gen_expr(e->u.binop.lhs);
         const char *rhs = gen_expr(e->u.binop.rhs);
-        const char *r = fresh();
-        if (is_cmp(e->u.binop.op)) {
-            printf("  %s = %s i32 %s, %s\n", r, binop_ir(e->u.binop.op), lhs, rhs);
-        } else {
-            printf("  %s = %s i32 %s, %s\n", r, binop_ir(e->u.binop.op), lhs, rhs);
+        const char *op  = binop_ir(e->u.binop.op);
+        const char *r   = fresh();
+        if (!op) {
+            fprintf(stderr, "codegen: 未知运算符 %d (line %d)\n",
+                    e->u.binop.op, e->line);
+            return const_name(0);
         }
+        printf("  %s = %s i32 %s, %s\n", r, op, lhs, rhs);
+        if (!strncmp(op, "icmp", 4)) last_is_i1 = 1;
         return r;
     }
+
     case AST_ASSIGN: {
+        /* 先算右值，再取左值地址，最后 store —— 返回值是被赋的值 */
         const char *val = gen_expr(e->u.assign.expr);
         ASTNode *var = e->u.assign.var;
-        const char *slot = lookup(var->u.var.name);
         if (var->u.var.index) {
-            const char *idx = gen_expr(var->u.var.index);
-            const char *ptr = fresh();
-            printf("  %s = getelementptr i32, i32* %s, i32 %s\n", ptr, slot, idx);
-            printf("  store i32 %s, i32* %s\n", val, ptr);
-            n_vals--;
+            const char *p = gen_addr(var);
+            printf("  store i32 %s, ptr %s\n", val, p);
         } else {
-            printf("  store i32 %s, i32* %s\n", val, slot);
+            Binding *b = lookup(var->u.var.name);
+            if (!b) {
+                fprintf(stderr, "codegen: 未定义变量 %s (line %d)\n",
+                        var->u.var.name, var->line);
+                return val;
+            }
+            printf("  store i32 %s, ptr %s\n", val, b->slot);
         }
         return val;
     }
+
     case AST_CALL: {
+        /* 先求值所有实参（可能含副作用），再发射 call */
+        const char *args[32];
+        int  arg_is_ptr[32];
+        for (int i = 0; i < e->u.call.n && i < 32; i++) {
+            args[i] = gen_expr(e->u.call.args[i]);
+            arg_is_ptr[i] = last_is_ptr;
+        }
+        if (fun_is_void(e->u.call.name)) {
+            printf("  call void @%s(", e->u.call.name);
+            for (int i = 0; i < e->u.call.n; i++)
+                printf("%s%s %s", i ? ", " : "",
+                       arg_is_ptr[i] ? "ptr" : "i32", args[i]);
+            printf(")\n");
+            return const_name(0);
+        }
         const char *r = fresh();
         printf("  %s = call i32 @%s(", r, e->u.call.name);
-        for (int i = 0; i < e->u.call.n; i++) {
-            if (i) printf(", ");
-            const char *a = gen_expr(e->u.call.args[i]);
-            printf("i32 %s", a);
-        }
+        for (int i = 0; i < e->u.call.n; i++)
+            printf("%s%s %s", i ? ", " : "",
+                   arg_is_ptr[i] ? "ptr" : "i32", args[i]);
         printf(")\n");
         return r;
     }
+
     default:
-        return "%0";
+        return const_name(0);
     }
 }
 
-/* 用 blocks 状态: 当前 block 标签 */
-static int label_id = 0;
+/* ---------- 语句 ---------- */
 
-static void gen_stmt(ASTNode *s, int *ret_seen) {
-    if (!s) return;
+static void gen_stmt(ASTNode *s, int is_void_fun) {
+    if (!s || terminated) return;
     switch (s->kind) {
-    case AST_COMPOUND:
-        for (int i = 0; i < s->u.compound.ns; i++)
-            gen_stmt(s->u.compound.stmts[i], ret_seen);
+
+    case AST_COMPOUND: {
+        ASTNode *c = s;
+        /* 嵌套复合语句里的声明：就地 alloca（合法，只是不在 entry） */
+        for (int i = 0; i < c->u.compound.nd; i++) {
+            ASTNode *v = c->u.compound.decls[i];
+            if (v->kind != AST_VAR_DECL) continue;
+            const char *slot = fresh();
+            if (v->u.var_decl.array_size) {
+                printf("  %s = alloca [%d x i32]\n", slot, v->u.var_decl.array_size);
+                bind_local(v->u.var_decl.name, slot, B_ARRAY, v->u.var_decl.array_size);
+            } else {
+                printf("  %s = alloca i32\n", slot);
+                bind_local(v->u.var_decl.name, slot, B_SCALAR, 0);
+            }
+        }
+        for (int i = 0; i < c->u.compound.ns && !terminated; i++)
+            gen_stmt(c->u.compound.stmts[i], is_void_fun);
         break;
+    }
+
     case AST_EXPR_STMT:
-        if (s->u.expr_stmt.expr) gen_expr(s->u.expr_stmt.expr);
+        gen_expr(s->u.expr_stmt.expr);
         break;
+
     case AST_RETURN: {
-        const char *v = "%0";
-        if (s->u.ret_stmt.expr) v = gen_expr(s->u.ret_stmt.expr);
-        printf("  ret i32 %s\n", v);
-        if (ret_seen) *ret_seen = 1;
+        if (is_void_fun || !s->u.ret_stmt.expr) {
+            printf("  ret %s\n", is_void_fun ? "void" : "i32 0");
+        } else {
+            const char *v = gen_expr(s->u.ret_stmt.expr);
+            printf("  ret i32 %s\n", v);
+        }
+        terminated = 1;
         break;
     }
+
     case AST_IF: {
-        const char *cond = gen_expr(s->u.if_stmt.cond);
-        int id = label_id++;
-        printf("  br i1 %s, label %%then%d, label %%else%d\n", cond, id, id);
-        printf("then%d:\n", id);
-        int r = 0;
-        gen_stmt(s->u.if_stmt.then_br, &r);
-        printf("  br label %%end%d\n", id);
-        printf("else%d:\n", id);
-        gen_stmt(s->u.if_stmt.else_br, &r);
-        printf("  br label %%end%d\n", id);
-        printf("end%d:\n", id);
+        const char *cond = to_cond(gen_expr(s->u.if_stmt.cond));
+        int  id = label_id++;
+        char then_blk[32], else_blk[32], end_blk[32];
+        snprintf(then_blk, sizeof then_blk, "then%d", id);
+        snprintf(end_blk,  sizeof end_blk,  "if.end%d", id);
+
+        if (s->u.if_stmt.else_br) {
+            snprintf(else_blk, sizeof else_blk, "else%d", id);
+            printf("  br i1 %s, label %%%s, label %%%s\n",
+                   cond, then_blk, else_blk);
+            terminated = 1;
+
+            emit_label(then_blk);
+            gen_stmt(s->u.if_stmt.then_br, is_void_fun);
+            br_to(end_blk);               /* then 里 return 过就不再补 br */
+
+            emit_label(else_blk);
+            gen_stmt(s->u.if_stmt.else_br, is_void_fun);
+            br_to(end_blk);
+        } else {
+            printf("  br i1 %s, label %%%s, label %%%s\n",
+                   cond, then_blk, end_blk);
+            terminated = 1;
+
+            emit_label(then_blk);
+            gen_stmt(s->u.if_stmt.then_br, is_void_fun);
+            br_to(end_blk);
+        }
+        emit_label(end_blk);              /* 汇合点；两支都 return 时无前驱 */
         break;
     }
+
     case AST_WHILE: {
-        int id = label_id++;
-        printf("  br label %%cond%d\n", id);
-        printf("cond%d:\n", id);
-        const char *cond = gen_expr(s->u.while_stmt.cond);
-        printf("  br i1 %s, label %%body%d, label %%end%d\n", cond, id, id);
-        printf("body%d:\n", id);
-        int r = 0;
-        gen_stmt(s->u.while_stmt.body, &r);
-        printf("  br label %%cond%d\n", id);
-        printf("end%d:\n", id);
+        int  id = label_id++;
+        char cond_blk[32], body_blk[32], end_blk[32];
+        snprintf(cond_blk, sizeof cond_blk, "while.cond%d", id);
+        snprintf(body_blk, sizeof body_blk, "while.body%d", id);
+        snprintf(end_blk,  sizeof end_blk,  "while.end%d", id);
+
+        br_to(cond_blk);                  /* 入口先跳去判断条件 */
+        emit_label(cond_blk);
+        const char *cond = to_cond(gen_expr(s->u.while_stmt.cond));
+        printf("  br i1 %s, label %%%s, label %%%s\n", cond, body_blk, end_blk);
+        terminated = 1;
+
+        emit_label(body_blk);
+        gen_stmt(s->u.while_stmt.body, is_void_fun);
+        br_to(cond_blk);                  /* 回边 */
+
+        emit_label(end_blk);
         break;
     }
+
     default:
         break;
     }

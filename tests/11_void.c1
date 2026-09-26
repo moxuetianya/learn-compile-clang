@@ -1,0 +1,13 @@
+/* 测试 11：void 函数 */
+int g;
+void set(int v) {
+    g = v;
+    return;
+}
+void noop() { }
+int main() {
+    set(40);
+    noop();
+    g = g + 2;
+    return g;                        /* 42 */
+}

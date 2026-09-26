@@ -31,9 +31,14 @@ endif
 
 BUILD   := build
 
-.PHONY: all c1c c1c_hand c1c_sema lexer-test parser-test clean test bison-report
+# 端到端工具链 (自动探测带版本号的 llc/clang)
+LLC     ?= $(firstword $(shell which llc-18 llc 2>/dev/null))
+CLANG   ?= $(firstword $(shell which clang-18 clang 2>/dev/null))
+OPT     ?= $(firstword $(shell which opt-18 opt 2>/dev/null))
 
-all: c1c_hand c1c_sema c1c
+.PHONY: all c1c c1c_hand c1c_sema c1c_emit c1c_full lexer-test parser-test clean test bison-report
+
+all: c1c_hand c1c_sema c1c c1c_emit
 
 # ---------- 手写版本（无外部依赖）----------
 c1c_hand: src/lexer/handwritten.c src/ast/ast.c src/driver/main_hand.c | $(BUILD)
@@ -58,6 +63,14 @@ c1c:
 	else \
 	    echo "Skipping c1c: flex+bison not installed (use 'apt install flex bison' or use c1c_hand)"; \
 	fi
+
+# ---------- 文本 IR 生成版本（第 9 章）----------
+c1c_emit: src/lexer/handwritten.c src/ast/ast.c src/sema/sema.c \
+          src/codegen/codegen.c src/driver/main_emit.c | $(BUILD)
+	$(CC) $(CFLAGS) -I src/ast -I src/lexer -I src/sema -I src/codegen \
+	  src/lexer/handwritten.c src/ast/ast.c src/sema/sema.c \
+	  src/codegen/codegen.c src/driver/main_emit.c \
+	  -o $(BUILD)/c1c_emit
 
 # ---------- 单独词法测试 ----------
 lexer-test: $(BUILD)/lex.yy.c $(BUILD)/c1.tab.c $(BUILD)/c1.tab.h src/lexer/main.c
@@ -88,9 +101,14 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 # ---------- 测试 ----------
-test: c1c_hand c1c_sema c1c
+test: c1c_hand c1c_sema c1c c1c_emit
 	@bash scripts/run_tests.sh
 	@bash scripts/run_sema_tests.sh
+	@if [ -n "$(LLC)" ] && [ -n "$(CLANG)" ]; then \
+	    LLC=$(LLC) CLANG=$(CLANG) OPT=$(OPT) bash scripts/run_e2e_tests.sh; \
+	else \
+	    echo "(llc/clang 不可用, 跳过端到端测试)"; \
+	fi
 
 clean:
 	rm -rf $(BUILD)

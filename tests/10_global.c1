@@ -1,0 +1,17 @@
+/* 测试 10：全局变量与全局数组 */
+int g;
+int arr[4];
+int fill() {
+    int i;
+    i = 0;
+    while (i < 4) {
+        arr[i] = i + g;
+        i = i + 1;
+    }
+    return arr[3];
+}
+int main() {
+    g = 10;
+    arr[0] = 5;                      /* 会被 fill() 覆盖成 10 */
+    return fill() + arr[0] + g;      /* 13 + 10 + 10 = 33 */
+}
