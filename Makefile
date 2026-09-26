@@ -36,9 +36,13 @@ LLC     ?= $(firstword $(shell which llc-18 llc 2>/dev/null))
 CLANG   ?= $(firstword $(shell which clang-18 clang 2>/dev/null))
 OPT     ?= $(firstword $(shell which opt-18 opt 2>/dev/null))
 
+# LLVM C++ 后端 (第 9-10 章): 需要 llvm-config
+LLVM_OK := $(shell which $(LLVM_CONFIG) 2>/dev/null)
+CXX     ?= clang++
+
 .PHONY: all c1c c1c_hand c1c_sema c1c_emit c1c_full lexer-test parser-test clean test bison-report
 
-all: c1c_hand c1c_sema c1c c1c_emit
+all: c1c_hand c1c_sema c1c c1c_emit c1c_full
 
 # ---------- 手写版本（无外部依赖）----------
 c1c_hand: src/lexer/handwritten.c src/ast/ast.c src/driver/main_hand.c | $(BUILD)
@@ -71,6 +75,32 @@ c1c_emit: src/lexer/handwritten.c src/ast/ast.c src/sema/sema.c \
 	  src/lexer/handwritten.c src/ast/ast.c src/sema/sema.c \
 	  src/codegen/codegen.c src/driver/main_emit.c \
 	  -o $(BUILD)/c1c_emit
+
+# ---------- LLVM C++ API 完整版（第 9-10 章）----------
+# 前端 C (handwritten/ast/sema) + 后端 C++ (LLVM IRBuilder → .o) + 链接
+c1c_full:
+	@if [ -n "$(LLVM_OK)" ]; then \
+	    $(MAKE) $(BUILD)/c1c_full; \
+	else \
+	    echo "Skipping c1c_full: llvm-config not found (sudo apt install llvm-18-dev)"; \
+	fi
+
+$(BUILD)/c1c_full: src/lexer/handwritten.c src/ast/ast.c src/sema/sema.c \
+                   src/codegen/llvm_codegen.cpp src/driver/main_full.cpp \
+                   src/codegen/llvm_codegen.h | $(BUILD)
+	$(CC) $(CFLAGS) -I src/ast -I src/lexer -c src/lexer/handwritten.c -o $(BUILD)/handwritten.o
+	$(CC) $(CFLAGS) -I src/ast -I src/lexer -c src/ast/ast.c -o $(BUILD)/ast.o
+	$(CC) $(CFLAGS) -I src/ast -I src/sema -c src/sema/sema.c -o $(BUILD)/sema.o
+	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) -I src -I src/ast -I src/lexer -I src/sema -I src/codegen \
+	  -c src/codegen/llvm_codegen.cpp -o $(BUILD)/llvm_codegen.o
+	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) -I src -I src/ast -I src/lexer -I src/sema -I src/codegen \
+	  -c src/driver/main_full.cpp -o $(BUILD)/main_full.o
+	$(CXX) $(BUILD)/handwritten.o $(BUILD)/ast.o $(BUILD)/sema.o \
+	  $(BUILD)/llvm_codegen.o $(BUILD)/main_full.o \
+	  $(shell $(LLVM_CONFIG) --libs core native) $(shell $(LLVM_CONFIG) --system-libs) \
+	  -o $(BUILD)/c1c_full
+
+CXXFLAGS ?= -Wall -Wextra -O0 -g
 
 # ---------- 单独词法测试 ----------
 lexer-test: $(BUILD)/lex.yy.c $(BUILD)/c1.tab.c $(BUILD)/c1.tab.h src/lexer/main.c

@@ -51,6 +51,27 @@ for t in examples/*.c1 tests/*.c1; do
     "$TMP/$name"
     got=$?
 
+    # 3b) LLVM C++ API 后端 (c1c_full) 双路验证: 一条龙到可执行文件
+    if [ -x "$BUILD/c1c_full" ]; then
+        if ! "$BUILD/c1c_full" "$t" -o "$TMP/${name}_full" 2> "$TMP/$name.ferr"; then
+            echo "  ✗ c1c_full failed:"; head -5 "$TMP/$name.ferr"; fail=$((fail+1)); continue
+        fi
+        "$TMP/${name}_full"
+        got2=$?
+        if [ "$got2" != "$want" ]; then
+            echo "  ✗ c1c_full exit $got2, want $want"
+            fail=$((fail+1)); continue
+        fi
+        # --opt 优化模式行为必须一致 (第 11 章)
+        "$BUILD/c1c_full" "$t" --opt -o "$TMP/${name}_full_opt" 2>/dev/null
+        "$TMP/${name}_full_opt"
+        got3=$?
+        if [ "$got3" != "$want" ]; then
+            echo "  ✗ c1c_full --opt exit $got3, want $want"
+            fail=$((fail+1)); continue
+        fi
+    fi
+
     if [ "$got" = "$want" ]; then
         echo "  ✓ exit $got"
         pass=$((pass+1))
