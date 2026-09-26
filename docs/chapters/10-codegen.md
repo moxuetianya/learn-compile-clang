@@ -196,26 +196,37 @@ clang fib.o -o fib -no-pie
 
 ## 10.9 完整流程脚本
 
-`scripts/build_and_run.sh`：
+仓库里有现成的 [`scripts/build_and_run.sh`](../../scripts/build_and_run.sh)：
 
 ```bash
-#!/usr/bin/env bash
-set -e
-SRC=${1:-examples/fib.c1}
-LLVM_CONFIG=$(which llvm-config-18 || which llvm-config)
+$ scripts/build_and_run.sh examples/fib.c1 build/out
+== build/out.ll (LLVM IR) ==
+== build/out.s (汇编, 前 12 行) ==
+...
+== run build/out ==
+exit=55
+```
 
-# 前端：c1c → .ll
-./build/c1c "$SRC" -o build/out.ll
+它就是本章流程的脚本化：前端 `c1c_emit` 出 `.ll` → `opt` 验证 →
+`llc` 出 `.s` → `clang` 链接 → 运行。
 
-# 中端：llc → .s
-llc-18 build/out.ll -o build/out.s
+### 进程内一条龙：c1c_full
 
-# 后端：assembler + linker
-clang-18 build/out.s -o build/out
+`c1c_full`（[`src/codegen/llvm_codegen.cpp`](../../src/codegen/llvm_codegen.cpp)）
+不借助外部 llc：`TargetMachine::addPassesToEmitFile` 直接在进程内驱动
+LLVM 后端产出 `.o`，再调系统链接器：
 
-# 跑
-./build/out
-echo "exit=$?"
+```cpp
+TargetMachine *TM = target->createTargetMachine(triple, "generic", "", opts, std::nullopt);
+M->setDataLayout(TM->createDataLayout());        // 目标机器的数据布局
+legacy::PassManager emit;
+TM->addPassesToEmitFile(emit, dest, nullptr, CodeGenFileType::ObjectFile);
+emit.run(*M);                                    // .o 写入 dest
+```
+
+```bash
+$ ./build/c1c_full examples/fib.c1 -o fib && ./fib ; echo $?
+55
 ```
 
 ## 10.10 性能调优入门

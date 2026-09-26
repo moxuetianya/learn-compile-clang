@@ -14,18 +14,14 @@
 
 ## 11.2 LLVM Pass 体系
 
-LLVM 用 **Pass 框架** 把每个优化做成一个 Pass，依次跑：
+LLVM 用 **Pass 框架** 把每个优化做成一个 Pass，依次跑。
 
-```
-Module
-  │ FunctionPass
-  │   │ BasicBlockPass
-  │   │   │ Instruction
-  │   └►
-  └►
-```
+> LLVM 12 起新 Pass Manager（NM）逐步取代旧 PM（`FunctionPass`/
+> `RegisterPass`）。命令行 `opt -passes=...` 与仓库 `c1c_full --opt` 都是新 PM；
+> 下面先给旧 PM 写法（大量老代码和老教程仍是它，必须认识），再给仓库
+> 实际跑的 NM 流水线。
 
-Pass 注册：
+**旧 Pass Manager**（Legacy）注册：
 
 ```cpp
 #include "llvm/Pass.h"
@@ -82,7 +78,31 @@ static RegisterPass<ConstFoldPass> X("constfold", "Constant Folding");
 跑：
 
 ```bash
-opt -constfold fib.ll -o fib.opt.ll -S
+opt -constfold fib.ll -o fib.opt.ll -S   # 旧: opt -load 插件加载
+```
+
+**新 Pass Manager**（仓库 `c1c_full --opt` 实际跑的，见
+[`src/codegen/llvm_codegen.cpp`](../../src/codegen/llvm_codegen.cpp) 的
+`run_opt_pipeline`）：
+
+```cpp
+ModulePassManager MPM;
+FunctionPassManager FPM;
+FPM.addPass(PromotePass());      // mem2reg: alloca → SSA 寄存器
+FPM.addPass(InstCombinePass());  // 常量折叠/化简就在这里面
+FPM.addPass(SimplifyCFGPass());  // 合并/清理基本块
+MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+MPM.run(M, MAM);
+```
+
+亲手感受（对比优化前后的 IR，这是本章最重要的实验）：
+
+```bash
+$ ./build/c1c_full examples/fib.c1 --emit-llvm        > before.ll
+$ ./build/c1c_full examples/fib.c1 --emit-llvm --opt  > after.ll
+$ diff before.ll after.ll
+# before: 一堆 alloca/load/store; after: 只剩参数 %p_n 上的直接运算
+# 端到端行为不变: 两种模式编译出的程序退出码完全一致 (make test 验证)
 ```
 
 ## 11.3 内置 Pass 列表

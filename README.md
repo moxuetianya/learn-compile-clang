@@ -45,16 +45,7 @@ Lex       Yacc/     作用域/    AST +         LLVM IR     llc → 原生
 实现一个能编译 **C1 子集** 的编译器 `c1c`：
 
 ```bash
-$ cat examples/fib.c1
-int fib(int n) {
-    if (n < 2) return n;
-    return fib(n - 1) + fib(n - 2);
-}
-int main() {
-    return fib(10);
-}
-
-$ ./c1c examples/fib.c1 -o fib
+$ ./build/c1c_full examples/fib.c1 -o fib
 $ ./fib ; echo $?
 55
 ```
@@ -62,10 +53,10 @@ $ ./fib ; echo $?
 能力清单（按章节递进）：
 - [x] 第 2 章：词法
 - [x] 第 6 章：语法
-- [ ] 第 8 章：作用域/类型
-- [ ] 第 9 章：翻译成 LLVM IR
-- [ ] 第 10 章：可执行文件
-- [ ] 第 11 章：常量折叠 Pass
+- [x] 第 8 章：作用域/类型
+- [x] 第 9 章：翻译成 LLVM IR（文本版 + LLVM C++ API 版）
+- [x] 第 10 章：可执行文件（进程内 TargetMachine + 系统链接器）
+- [x] 第 11 章：优化流水线（mem2reg + instcombine + simplifycfg，`--opt`）
 
 ---
 
@@ -97,12 +88,15 @@ $ ./fib ; echo $?
 │   ├── parser/          # bison 源文件
 │   ├── ast/             # 抽象语法树
 │   ├── sema/            # 语义分析（符号表、类型）
-│   ├── codegen/         # LLVM IR 生成（教学版）
-│   └── driver/          # main、选项解析
+│   ├── codegen/         # codegen.c 文本 IR 教学版
+│   │                    # + llvm_codegen.cpp LLVM C++ API 版（第 9-10 章）
+│   └── driver/          # main、选项解析（main_full.cpp = 完整编译器）
 ├── tests/               # 测试用例与脚本
+│   ├── expected/        # AST 期望输出
+│   └── e2e/             # 端到端期望退出码
 ├── examples/            # C1 示例程序
 ├── scripts/             # 构建/测试脚本
-└── build/               # 构建产物
+└── build/               # 构建产物（git 忽略）
 ```
 
 ## 当前已实现
@@ -112,8 +106,8 @@ $ ./fib ; echo $?
 | `c1c_hand` | ✅ | 第 1-7 章 | 纯 C 手写 lexer+parser，打印 AST |
 | `c1c_sema` | ✅ | 第 8 章 | 加上语义分析（符号表、类型） |
 | `c1c` | ✅ | 第 2-6 章 | flex/bison 版本（需安装 flex+bison） |
-| `c1c_emit` | ⚠️ | 第 9 章 | 文本 LLVM IR 生成（教学版，if/while 翻译有 bug） |
-| `c1c` 链接 LLVM C++ API | ❌ | 第 9-10 章 | 真正 codegen（待实现） |
+| `c1c_emit` | ✅ | 第 9 章 | 文本 LLVM IR 生成（教学版，短路求值/数组/全局变量齐全） |
+| `c1c_full` | ✅ | 第 9-11 章 | LLVM C++ API 完整编译器：一条龙到可执行文件；`--emit-llvm` / `--emit-obj` / `--opt`（需 llvm-18-dev） |
 
 跑测试：
 
@@ -121,8 +115,11 @@ $ ./fib ; echo $?
 make test
 ```
 
-会编译 `c1c_hand` + `c1c_sema` + （如检测到 flex/bison）`c1c`，跑所有 AST 输出比对 + 语义检查。
-两份 lexer/parser（手写 vs flex/bison）对比，验证两者行为一致。
+会编译全部工具，跑三层测试：
+1. **AST 比对**（手写 + flex/bison 两套前端，行为必须一致）
+2. **语义检查**
+3. **端到端**：每个程序经三条路径编译运行（`c1c_emit → opt 验证 → llc → clang`、
+   `c1c_full` 直出、`c1c_full --opt` 优化模式），退出码必须一致
 
 如果 flex/bison 安装在非标准位置（例如 `dpkg -x` 解压后）：
 
@@ -135,9 +132,10 @@ Makefile 会自动推断 `BISON_PKGDATADIR` 让 bison 找到它的 m4 文件。
 ## 测试统计
 
 ```
-AST parser tests:   12 passed
-Semantic tests:     11 passed
-Total:              23 passed (含手写 + flex/bison 两套)
+AST parser tests:   16 passed
+Semantic tests:     15 passed
+E2E (×3 条路径):    13 passed
+Total:              44 passed (含手写 + flex/bison 两套前端)
 ```
 
 ---
