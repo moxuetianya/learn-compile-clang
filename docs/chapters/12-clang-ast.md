@@ -190,22 +190,65 @@ clang -fplugin=./my-plugin.so -Xclang -plugin-my-flag test.c
 
 ## 12.5 实战：写一个 Clang Plugin 找未使用变量
 
-> 用 RecursiveASTVisitor 访问所有 VarDecl，再看是否有被引用。
+> 本章实现：[`src/clang-plugin/unused-vars.cpp`](../../src/clang-plugin/unused-vars.cpp)，
+> 骨架完整可直接编译加载。
+
+三件套：**Visitor 收集 → Consumer 触发 → Action 注册**。
+
+1）Visitor：遍历 AST，收集"声明了什么"和"引用了什么"：
 
 ```cpp
-class UnusedVarVisitor : public RecursiveASTVisitor<UnusedVarVisitor> {
+class UnusedVarsVisitor : public RecursiveASTVisitor<UnusedVarsVisitor> {
 public:
-    bool VisitVarDecl(VarDecl *VD) {
-        if (VD->isLocalVarDecl() && !VD->isUsed() && !VD->hasAttr<UnusedAttr>()) {
-            DiagnosticsEngine &diag = ...;
-            diag.Report(VD->getLocation(), diag.getCustomDiagID(
-                DiagnosticsEngine::Warning, "unused variable '%0'"))
-                << VD->getNameAsString();
-        }
+    bool VisitVarDecl(VarDecl *VD) {          /* 声明 */
+        if (isa<ParmVarDecl>(VD)) return true; /* 参数不查 */
+        if (!VD->isLocalVarDecl()) return true;/* 只查局部变量 */
+        decls.push_back(VD);
         return true;
     }
+    bool VisitDeclRefExpr(DeclRefExpr *E) {    /* 引用 (读/写都算) */
+        if (auto *VD = dyn_cast<VarDecl>(E->getDecl()))
+            used.insert(VD->getCanonicalDecl());
+        return true;
+    }
+    /* 差集 = 从未被引用 → 告警 */
 };
 ```
+
+2）告警走 `DiagnosticsEngine`（和 clang 自己的告警同一条通路，带源码位置、
+能被 `-Werror` 控制）。**坑**：`DiagnosticBuilder` 是 RAII，析构时才提交诊断；
+上一条还在作用域里就发下一条会触发
+`"Multiple diagnostics in flight at once!"` 断言——每条诊断要用 `{ }` 限
+制生命周期：
+
+```cpp
+{
+    auto D = diag.Report(VD->getLocation(), warn_id);
+    D << VD->getNameAsString();
+}   // ← 到这里才提交
+```
+
+3）入口 `PluginASTAction`，`getActionType()` 返回 `AddBeforeMainAction`
+使得 `-fplugin` 加载即运行（不需要 `-Xclang -plugin` 显式选择）：
+
+```cpp
+static FrontendPluginRegistry::Add<UnusedVarsPluginAction>
+    X("unused-vars", "warn on local variables that are never referenced");
+```
+
+构建 + 使用：
+
+```bash
+make clang-plugin
+clang-18 -fplugin=build/unused-vars.so -fsyntax-only tests/clang_plugin_demo.c
+tests/clang_plugin_demo.c:11:9: warning: unused variable 'unused_var'
+tests/clang_plugin_demo.c:12:9: warning: unused variable 'also_unused'
+2 warnings generated.
+```
+
+局限（留作练习）：`int x; x = 5;` 里赋值左边也是 `DeclRefExpr`，算"被引用"。
+要抓 unused-but-set 需要区分读写（值类别/`Expr::isLValue()`）。
+clang 自带的 `-Wunused-but-set-variable` 就是这么做的。
 
 ## 12.6 现场常用方法的优劣
 

@@ -140,25 +140,83 @@ $ diff before.ll after.ll
 
 ## 11.5 实战：在 c1c 里跑优化
 
-最简单的：生成 IR 后直接调 `opt`。
+仓库里有两条路：
+
+**路径 A：命令行 opt**（把 IR 落盘后手动跑）
 
 ```bash
-./c1c fib.c1 -o fib.ll
-opt -O2 fib.ll -o fib.opt.ll -S
-llc fib.opt.ll -o fib.s
-clang fib.s -o fib
+./build/c1c_emit < examples/fib.c1 > fib.ll
+opt-18 -O2 fib.ll -o fib.opt.ll -S
+llc-18 fib.opt.ll -o fib.s && clang-18 fib.s -o fib
 ```
 
-或者在 C++ 内部用 `llvm::PassManager`：
+**路径 B：进程内新 PM**（`c1c_full --opt`，见
+[`src/codegen/llvm_codegen.cpp`](../../src/codegen/llvm_codegen.cpp) 的
+`run_opt_pipeline`）：
 
 ```cpp
-llvm::PassManagerBuilder pm;
-pm.OptLevel = 2;
-pm.populateModulePassManager(mpm);
-mpm.run(*mod);
+ModulePassManager MPM;
+FunctionPassManager FPM;
+FPM.addPass(PromotePass());      // mem2reg
+FPM.addPass(InstCombinePass());
+FPM.addPass(SimplifyCFGPass());
+MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+MPM.run(M, MAM);
 ```
 
-## 11.6 几个经典优化的直觉解释
+（旧的 `PassManagerBuilder` API 已随旧 PM 一起移除，别再用了。）
+
+## 11.6 实战：写一个自己的 Pass 插件（constfold）
+
+仓库实现了完整的新 PM 插件
+[`src/passes/constfold.cpp`](../../src/passes/constfold.cpp)：
+把"两个常量操作数的 add/sub/mul/sdiv/icmp"在编译期算掉，
+循环到不动点。核心只有两个函数：
+
+```cpp
+static Constant *foldBinary(BinaryOperator *bo) {
+    auto *L = dyn_cast<ConstantInt>(bo->getOperand(0));
+    auto *R = dyn_cast<ConstantInt>(bo->getOperand(1));
+    if (!L || !R) return nullptr;
+    switch (bo->getOpcode()) {
+    case Instruction::Add: return ConstantInt::get(bo->getType(),
+                                       L->getValue() + R->getValue());
+    /* ... */
+    }
+}
+
+extern "C" PassPluginLibraryInfo llvmGetPassPluginInfo() {
+    return {LLVM_PLUGIN_API_VERSION, "c1c-constfold", LLVM_VERSION_STRING,
+            [](PassBuilder &PB) {
+                PB.registerPipelineParsingCallback(
+                    [](StringRef Name, FunctionPassManager &FPM, auto) {
+                        if (Name == "c1c-constfold") {
+                            FPM.addPass(ConstFoldPass());
+                            return true;
+                        }
+                        return false;
+                    });
+            }};
+}
+```
+
+构建 + 使用（和 LLVM 自带 pass 组成流水线）：
+
+```bash
+make constfold-pass
+./build/c1c_emit < tests/13_constfold.c1 > fold.ll
+opt-18 -load-pass-plugin=build/constfold.so \
+       -passes='function(mem2reg,c1c-constfold,simplifycfg,c1c-constfold)' \
+       fold.ll -S
+```
+
+> **流水线顺序是重点**：mem2reg 把变量提升成 phi 后，constfold 折掉
+> 常量运算；simplifycfg 消掉 `br i1 true` 的死分支，phi 退化成常量；
+> 这时要 **再跑一次 constfold** 才能折到底。真实世界的 `-O2` 就是把
+> pass 交替迭代到不动点，原因就在这。`scripts/run_extras_tests.sh`
+> 验证了"折到只剩 `ret i32 25`"且运行行为不变。
+
+## 11.7 几个经典优化的直觉解释
 
 ### 11.6.1 常量折叠
 
@@ -198,7 +256,7 @@ int t2 = a + b;     // 第二次不需要重算
 
 GVN 找等价的表达式复用。
 
-## 11.7 写一个完整的 Pass 流程
+## 11.8 旧 PM 独立工具长什么样（认识即可）
 
 ```cpp
 int main(int argc, char **argv) {
@@ -207,7 +265,7 @@ int main(int argc, char **argv) {
     SMDiagnostic err;
     auto mod = parseIRFile(argv[1], err, ctx);
 
-    // 注册并跑 Pass
+    // 注册并跑 Pass (legacy PM)
     legacy::FunctionPassManager fpm(mod.get());
     fpm.add(new ConstFoldPass());
     fpm.doInitialization();
@@ -225,7 +283,9 @@ int main(int argc, char **argv) {
 clang++ -g constfold.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core passes` -o constfold
 ```
 
-## 11.8 看优化的效果
+> 新 PM 的等价物就是 11.6 的插件 + `opt -load-pass-plugin`，不用自己写 main。
+
+## 11.9 看优化的效果
 
 ```bash
 $ opt -O0 fib.ll -S | wc -l
@@ -242,7 +302,7 @@ real    0m0.4s
 
 > 优化让编译器慢但让程序快。
 
-## 11.9 小结
+## 11.10 小结
 
 - 优化是 LLVM 强项，核心机制是 Pass
 - 自定义 Pass 用 C++ 写，30 行就能实现常量折叠

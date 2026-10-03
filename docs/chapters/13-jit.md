@@ -20,66 +20,86 @@ JIT：源码 → 编译期 → IR → 运行期边解释边编译
 
 | 代 | 名字 | 状态 |
 | -- | ---- | ---- |
-| 1 | MCJIT | 旧，仍能用 |
-| 2 | ORC | 当前主流 |
-| 3 | ORC v2 / JITLink | 新 |
+| 1 | MCJIT / ExecutionEngine | 旧，废弃（`runFunction`/`GenericValue` 那套） |
+| 2 | ORC v1 | 过渡 |
+| 3 | **ORC v2 / LLJIT / JITLink** | 当前主流 |
 
-我们用 ORC。
+我们用 ORC v2 的 `LLJIT` 高层 API。
 
-## 13.3 最小 ORC 程序
+## 13.3 最小 ORC 程序（LLJIT）
 
 ```cpp
-#include <llvm/IR/LLVMContext.h>
+#include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/Module.h>
-#include <llvm/ExecutionEngine/ExecutionEngine.h>
-#include <llvm/ExecutionEngine/GenericValue.h>
-#include <llvm/ExecutionEngine/Interpreter.h>
+#include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/TargetSelect.h>
 
 int main() {
+    /* 独立进程里必须先注册本机 target —— 没人替你初始化 */
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
 
     llvm::LLVMContext ctx;
-    llvm::Module *mod = new llvm::Module("jit", ctx);
+    auto mod = std::make_unique<llvm::Module>("jit", ctx);
     llvm::IRBuilder<> b(ctx);
 
     // int add(int a, int b) { return a + b; }
-    auto *i32 = b.getInt32Ty();
-    auto *ft = llvm::FunctionType::get(i32, {i32, i32}, false);
-    auto *f = llvm::Function::Create(ft, llvm::Function::ExternalLinkage, "add", mod);
-    auto *bb = llvm::BasicBlock::Create(ctx, "entry", f);
-    b.SetInsertPoint(bb);
+    auto *ft = llvm::FunctionType::get(b.getInt32Ty(),
+                                       {b.getInt32Ty(), b.getInt32Ty()}, false);
+    auto *f = llvm::Function::Create(ft, llvm::Function::ExternalLinkage,
+                                     "add", *mod);
+    b.SetInsertPoint(llvm::BasicBlock::Create(ctx, "entry", f));
     b.CreateRet(b.CreateAdd(f->getArg(0), f->getArg(1)));
 
-    // 创建 ExecutionEngine
-    std::string err;
-    auto *ee = llvm::EngineBuilder(std::move(std::unique_ptr<llvm::Module>(mod)))
-                  .setErrorStr(&err)
-                  .create();
-    if (!ee) { llvm::errs() << err; return 1; }
+    // 创建 LLJIT, 移交模块 (Module 引用的类型活在 ctx 里, 两者要一起移交)
+    auto jit = llvm::orc::LLJITBuilder().create();
+    if (!jit) { llvm::errs() << llvm::toString(jit.takeError()); return 1; }
+    llvm::orc::ThreadSafeModule tsm(std::move(mod), std::move(ctx));
+    if (auto err = (*jit)->addIRModule(std::move(tsm))) {
+        llvm::errs() << llvm::toString(std::move(err));
+        return 1;
+    }
 
-    // 调用 add(40, 2)
-    std::vector<llvm::GenericValue> args(2);
-    args[0].IntVal = llvm::APInt(32, 40);
-    args[1].IntVal = llvm::APInt(32, 2);
-    llvm::GenericValue r = ee->runFunction(f, args);
-    llvm::outs() << "add(40,2) = " << r.IntVal << "\n";
-
+    // 查找符号拿到函数指针, 直接调用
+    auto add = (*jit)->lookup("add");
+    if (!add) { llvm::errs() << llvm::toString(add.takeError()); return 1; }
+    int r = add->toPtr<int (*)(int, int)>()(40, 2);
+    llvm::outs() << "add(40,2) = " << r << "\n";
     return 0;
 }
 ```
 
 ```bash
-$ clang++ -g jit.cpp `llvm-config --cxxflags --ldflags --libs core executionengine interpreter native` -o jit
+$ clang++ -std=c++17 jit.cpp $(llvm-config --cxxflags --ldflags \
+      --libs core orcjit native --system-libs) -o jit
 $ ./jit
 add(40,2) = 42
 ```
 
-> 注意：`EngineBuilder` 默认选解释器；要 JIT 编译要加 `.setEngineKind(llvm::EngineKind::JIT)`。
+关键三步：`LLJITBuilder().create()` → `addIRModule` → `lookup`。
+和旧 MCJIT 的区别：模块所有权随 `ThreadSafeModule` 移交；符号查找是
+**按名字异步解析**的（支持懒编译、按需链接）。
 
-## 13.4 真实场景
+## 13.4 实战：c1c_jit —— 让 C1 程序在进程内跑起来
+
+> 本章实现：[`src/driver/main_jit.cpp`](../../src/driver/main_jit.cpp)。
+> 前端/sema/IR 生成与 `c1c_full` 完全共用（`c1_llvm_build_module`
+> 把 Module 连同它的 LLVMContext 一起移交给 JIT）。
+
+```bash
+$ make c1c_jit
+$ ./build/c1c_jit examples/fib.c1
+main returned 55
+$ ./build/c1c_jit examples/fib.c1 --opt
+main returned 55
+```
+
+对比 `c1c_full`：**不产出任何文件**——没有 .o、不调链接器，IR 生成后
+直接在内存里 JIT 编译执行。这就是数据库/DSL/REPL 场景的形态。
+
+（注意：进程退出码只有 8 位，所以返回值单独打印一行。）
+
+## 13.5 真实场景
 
 - 数据库查询执行（每次 query 不同）
 - 表达式 DSL（Excel 公式、自定义规则）
@@ -88,15 +108,18 @@ add(40,2) = 42
 
 > Clang 自己的 `-fintegrated-cc1` 内部就用 JIT 跑一些 codegen。
 
-## 13.5 小结
+## 13.6 小结
 
-- JIT = 运行时编译执行
-- LLVM 提供 ExecutionEngine/ORC API
-- 教学场景少用，但对理解编译器和写 DSL 极有价值
+- JIT = 运行时编译执行；LLVM 当代 API 是 ORC LLJIT（MCJIT/ExecutionEngine 已废弃）
+- 三步曲：`LLJITBuilder().create()` → `addIRModule` → `lookup`
+- 仓库的 `c1c_jit` 复用整套前端，IR 不落盘直接执行
 
 **练习**：
-1. 把第 9 章生成的 IR 直接喂给 ORC，跑 fib(10)。
-2. 写一个简单 DSL：`expr = NUMBER | expr + expr`，用 JIT 跑。
+1. （已实现）`c1c_jit examples/fib.c1`——阅读 `src/driver/main_jit.cpp`，
+   画出数据流：.c1 → AST → Module → JIT → 函数指针。
+2. 给 `c1c_jit` 加一个交互模式：循环读入一行表达式，JIT 编译后立即打印
+   结果（迷你 REPL）。提示：每个表达式生成一个 `__expr_N` 函数。
+3. 写一个简单 DSL：`expr = NUMBER | expr + expr`，用 LLJIT 跑。
 
 ---
 **下一章**：[第 14 章 期末项目](14-project.md)

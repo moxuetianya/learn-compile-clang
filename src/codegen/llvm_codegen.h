@@ -16,4 +16,10 @@
 int c1_llvm_emit_text(ASTNode *root, FILE *out, int optimize);
 int c1_llvm_emit_object(ASTNode *root, const char *obj_path, int optimize);
 
+/* JIT 用 (第 13 章): 构建模块并移交所有权。
+ * out_ctx/out_mod 是不透明的指针, 实际类型是 LLVMContext 与 Module,
+ * 调用方负责用对应的智能指针接管并 delete。 */
+int c1_llvm_build_module(ASTNode *root, int optimize,
+                         void **out_ctx, void **out_mod);
+
 #endif

@@ -1,0 +1,7 @@
+/* 测试 13：常量折叠素材（第 11 章 constfold Pass）*/
+int main() {
+    int a;
+    a = 2 + 3 * 4;          /* 14: mul/add 都是常量操作数 */
+    if (2 < 3) a = a + 1;   /* icmp 常量比较 → true */
+    return a * 2 - 5;       /* (14+1)*2-5 = 25 */
+}

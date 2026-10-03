@@ -40,9 +40,10 @@ OPT     ?= $(firstword $(shell which opt-18 opt 2>/dev/null))
 LLVM_OK := $(shell which $(LLVM_CONFIG) 2>/dev/null)
 CXX     ?= clang++
 
-.PHONY: all c1c c1c_hand c1c_sema c1c_emit c1c_full lexer-test parser-test clean test bison-report
+.PHONY: all c1c c1c_hand c1c_sema c1c_emit c1c_full c1c_jit constfold-pass clang-plugin \
+        lexer-test parser-test clean test bison-report
 
-all: c1c_hand c1c_sema c1c c1c_emit c1c_full
+all: c1c_hand c1c_sema c1c c1c_emit c1c_full c1c_jit constfold-pass clang-plugin
 
 # ---------- 手写版本（无外部依赖）----------
 c1c_hand: src/lexer/handwritten.c src/ast/ast.c src/driver/main_hand.c | $(BUILD)
@@ -85,22 +86,77 @@ c1c_full:
 	    echo "Skipping c1c_full: llvm-config not found (sudo apt install llvm-18-dev)"; \
 	fi
 
-$(BUILD)/c1c_full: src/lexer/handwritten.c src/ast/ast.c src/sema/sema.c \
-                   src/codegen/llvm_codegen.cpp src/driver/main_full.cpp \
-                   src/codegen/llvm_codegen.h | $(BUILD)
-	$(CC) $(CFLAGS) -I src/ast -I src/lexer -c src/lexer/handwritten.c -o $(BUILD)/handwritten.o
-	$(CC) $(CFLAGS) -I src/ast -I src/lexer -c src/ast/ast.c -o $(BUILD)/ast.o
-	$(CC) $(CFLAGS) -I src/ast -I src/sema -c src/sema/sema.c -o $(BUILD)/sema.o
+# 共享对象文件 (c1c_full / c1c_jit 复用)
+$(BUILD)/handwritten.o: src/lexer/handwritten.c | $(BUILD)
+	$(CC) $(CFLAGS) -I src/ast -I src/lexer -c $< -o $@
+
+$(BUILD)/ast.o: src/ast/ast.c | $(BUILD)
+	$(CC) $(CFLAGS) -I src/ast -I src/lexer -c $< -o $@
+
+$(BUILD)/sema.o: src/sema/sema.c | $(BUILD)
+	$(CC) $(CFLAGS) -I src/ast -I src/sema -c $< -o $@
+
+$(BUILD)/llvm_codegen.o: src/codegen/llvm_codegen.cpp src/codegen/llvm_codegen.h | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) -I src -I src/ast -I src/lexer -I src/sema -I src/codegen \
-	  -c src/codegen/llvm_codegen.cpp -o $(BUILD)/llvm_codegen.o
+	  -c $< -o $@
+
+$(BUILD)/main_full.o: src/driver/main_full.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) -I src -I src/ast -I src/lexer -I src/sema -I src/codegen \
-	  -c src/driver/main_full.cpp -o $(BUILD)/main_full.o
+	  -c $< -o $@
+
+$(BUILD)/main_jit.o: src/driver/main_jit.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) -I src -I src/ast -I src/lexer -I src/sema -I src/codegen \
+	  -c $< -o $@
+
+$(BUILD)/c1c_full: $(BUILD)/handwritten.o $(BUILD)/ast.o $(BUILD)/sema.o \
+                   $(BUILD)/llvm_codegen.o $(BUILD)/main_full.o | $(BUILD)
 	$(CXX) $(BUILD)/handwritten.o $(BUILD)/ast.o $(BUILD)/sema.o \
 	  $(BUILD)/llvm_codegen.o $(BUILD)/main_full.o \
 	  $(shell $(LLVM_CONFIG) --libs core native) $(shell $(LLVM_CONFIG) --system-libs) \
-	  -o $(BUILD)/c1c_full
+	  -o $@
 
-CXXFLAGS ?= -Wall -Wextra -O0 -g
+# ---------- ORC JIT 版本（第 13 章）----------
+c1c_jit:
+	@if [ -n "$(LLVM_OK)" ]; then \
+	    $(MAKE) $(BUILD)/c1c_jit; \
+	else \
+	    echo "Skipping c1c_jit: llvm-config not found (sudo apt install llvm-18-dev)"; \
+	fi
+
+$(BUILD)/c1c_jit: $(BUILD)/handwritten.o $(BUILD)/ast.o $(BUILD)/sema.o \
+                  $(BUILD)/llvm_codegen.o $(BUILD)/main_jit.o | $(BUILD)
+	$(CXX) $(BUILD)/handwritten.o $(BUILD)/ast.o $(BUILD)/sema.o \
+	  $(BUILD)/llvm_codegen.o $(BUILD)/main_jit.o \
+	  $(shell $(LLVM_CONFIG) --libs core orcjit native) $(shell $(LLVM_CONFIG) --system-libs) \
+	  -o $@
+
+# ---------- Pass 插件（第 11 章）----------
+constfold-pass:
+	@if [ -n "$(LLVM_OK)" ]; then \
+	    $(MAKE) $(BUILD)/constfold.so; \
+	else \
+	    echo "Skipping constfold-pass: llvm-config not found"; \
+	fi
+
+$(BUILD)/constfold.so: src/passes/constfold.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) -fPIC -shared \
+	  src/passes/constfold.cpp -o $@
+
+# ---------- Clang 插件（第 12 章）----------
+clang-plugin:
+	@if [ -n "$(LLVM_OK)" ] && [ -n "$(CLANG_CPP)" ]; then \
+	    $(MAKE) $(BUILD)/unused-vars.so; \
+	else \
+	    echo "Skipping clang-plugin: libclang-cpp not found (sudo apt install libclang-cpp-18-dev)"; \
+	fi
+
+CLANG_CPP := $(firstword $(wildcard /usr/lib/llvm-*/lib/libclang-cpp.so*))
+
+$(BUILD)/unused-vars.so: src/clang-plugin/unused-vars.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(LLVM_CXXFLAGS) -fPIC -shared \
+	  src/clang-plugin/unused-vars.cpp $(CLANG_CPP) -o $@
+
+CXXFLAGS ?= -Wall -Wextra -O0 -g -std=c++17
 
 # ---------- 单独词法测试 ----------
 lexer-test: $(BUILD)/lex.yy.c $(BUILD)/c1.tab.c $(BUILD)/c1.tab.h src/lexer/main.c
@@ -131,13 +187,18 @@ $(BUILD):
 	mkdir -p $(BUILD)
 
 # ---------- 测试 ----------
-test: c1c_hand c1c_sema c1c c1c_emit
+test: c1c_hand c1c_sema c1c c1c_emit c1c_full c1c_jit constfold-pass clang-plugin
 	@bash scripts/run_tests.sh
 	@bash scripts/run_sema_tests.sh
 	@if [ -n "$(LLC)" ] && [ -n "$(CLANG)" ]; then \
 	    LLC=$(LLC) CLANG=$(CLANG) OPT=$(OPT) bash scripts/run_e2e_tests.sh; \
 	else \
 	    echo "(llc/clang 不可用, 跳过端到端测试)"; \
+	fi
+	@if [ -x $(BUILD)/c1c_jit ] || [ -f $(BUILD)/constfold.so ] || [ -f $(BUILD)/unused-vars.so ]; then \
+	    OPT=$(OPT) CLANG=$(CLANG) bash scripts/run_extras_tests.sh; \
+	else \
+	    echo "(JIT/Pass 插件/Clang 插件未构建, 跳过扩展测试)"; \
 	fi
 
 clean:

@@ -56,7 +56,9 @@ $ ./fib ; echo $?
 - [x] 第 8 章：作用域/类型
 - [x] 第 9 章：翻译成 LLVM IR（文本版 + LLVM C++ API 版）
 - [x] 第 10 章：可执行文件（进程内 TargetMachine + 系统链接器）
-- [x] 第 11 章：优化流水线（mem2reg + instcombine + simplifycfg，`--opt`）
+- [x] 第 11 章：优化流水线（`--opt`）+ 自研常量折叠 Pass 插件
+- [x] 第 12 章：Clang 插件（unused-vars，`-fplugin` 加载）
+- [x] 第 13 章：ORC LLJIT（`c1c_jit`，进程内执行）
 
 ---
 
@@ -90,7 +92,9 @@ $ ./fib ; echo $?
 │   ├── sema/            # 语义分析（符号表、类型）
 │   ├── codegen/         # codegen.c 文本 IR 教学版
 │   │                    # + llvm_codegen.cpp LLVM C++ API 版（第 9-10 章）
-│   └── driver/          # main、选项解析（main_full.cpp = 完整编译器）
+│   ├── passes/          # LLVM Pass 插件: constfold（第 11 章）
+│   ├── clang-plugin/    # Clang 插件: unused-vars（第 12 章）
+│   └── driver/          # main、选项解析（main_full.cpp / main_jit.cpp）
 ├── tests/               # 测试用例与脚本
 │   ├── expected/        # AST 期望输出
 │   └── e2e/             # 端到端期望退出码
@@ -108,6 +112,9 @@ $ ./fib ; echo $?
 | `c1c` | ✅ | 第 2-6 章 | flex/bison 版本（需安装 flex+bison） |
 | `c1c_emit` | ✅ | 第 9 章 | 文本 LLVM IR 生成（教学版，短路求值/数组/全局变量齐全） |
 | `c1c_full` | ✅ | 第 9-11 章 | LLVM C++ API 完整编译器：一条龙到可执行文件；`--emit-llvm` / `--emit-obj` / `--opt`（需 llvm-18-dev） |
+| `c1c_jit` | ✅ | 第 13 章 | ORC LLJIT：IR 不落盘，进程内直接执行 main（需 llvm-18-dev） |
+| `constfold.so` | ✅ | 第 11 章 | 自研常量折叠 Pass 插件，`opt -load-pass-plugin` 加载，与 LLVM pass 组合流水线 |
+| `unused-vars.so` | ✅ | 第 12 章 | Clang 插件：告警从未引用的局部变量，`clang -fplugin` 加载（需 libclang-cpp-18-dev） |
 
 跑测试：
 
@@ -132,10 +139,13 @@ Makefile 会自动推断 `BISON_PKGDATADIR` 让 bison 找到它的 m4 文件。
 ## 测试统计
 
 ```
-AST parser tests:   16 passed
-Semantic tests:     15 passed
-E2E (×3 条路径):    13 passed
-Total:              44 passed (含手写 + flex/bison 两套前端)
+AST parser tests:   17 passed
+Semantic tests:     16 passed
+E2E (×3 条路径):    14 passed   (文本 IR 流水线 / c1c_full / c1c_full --opt)
+JIT (×2 种模式):    14 passed   (c1c_jit / c1c_jit --opt)
+Pass 插件:           2 passed   (折到只剩 ret + 运行行为不变)
+Clang 插件:          1 passed   (准确报告 2 个未使用变量)
+Total:              64 组断言, 78 个检查点全部通过
 ```
 
 ---

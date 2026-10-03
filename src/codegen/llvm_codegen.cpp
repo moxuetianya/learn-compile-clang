@@ -51,7 +51,9 @@ struct VarInfo {
 
 class C1CodeGen {
 public:
-    C1CodeGen() : B(C) {
+    /* context 由外部提供 —— JIT 场景需要 Module 连同它的 context
+       一起移交出去 (Module 引用的类型都活在自己的 context 里) */
+    explicit C1CodeGen(LLVMContext &c) : C(c), B(c) {
         M = std::make_unique<Module>("c1c", C);
     }
 
@@ -60,7 +62,7 @@ public:
     std::unique_ptr<Module> takeModule() { return std::move(M); }
 
 private:
-    LLVMContext C;
+    LLVMContext &C;
     std::unique_ptr<Module> M;
     IRBuilder<> B;
 
@@ -445,7 +447,8 @@ static void run_opt_pipeline(Module &M) {
 }
 
 extern "C" int c1_llvm_emit_text(ASTNode *root, FILE *out, int optimize) {
-    C1CodeGen CG;
+    LLVMContext ctx;
+    C1CodeGen CG(ctx);
     CG.run(root);
     std::unique_ptr<Module> M = CG.takeModule();
     if (optimize) run_opt_pipeline(*M);
@@ -465,7 +468,8 @@ extern "C" int c1_llvm_emit_text(ASTNode *root, FILE *out, int optimize) {
 }
 
 extern "C" int c1_llvm_emit_object(ASTNode *root, const char *obj_path, int optimize) {
-    C1CodeGen CG;
+    LLVMContext ctx;
+    C1CodeGen CG(ctx);
     CG.run(root);
     std::unique_ptr<Module> M = CG.takeModule();
     if (optimize) run_opt_pipeline(*M);
@@ -516,5 +520,28 @@ extern "C" int c1_llvm_emit_object(ASTNode *root, const char *obj_path, int opti
     }
     emit.run(*M);
     dest.flush();
+    return 0;
+}
+
+/* ---------- JIT 入口（第 13 章）----------
+ * 构建模块并把所有权 (context + module) 移交给调用方。
+ * 调用方负责 delete。失败返回 1, 成功返回 0。
+ */
+extern "C" int c1_llvm_build_module(ASTNode *root, int optimize,
+                                    void **out_ctx, void **out_mod) {
+    auto ctx = std::make_unique<LLVMContext>();
+    C1CodeGen CG(*ctx);
+    CG.run(root);
+    std::unique_ptr<Module> M = CG.takeModule();
+    if (optimize) run_opt_pipeline(*M);
+
+    std::string verr;
+    raw_string_ostream ves(verr);
+    if (verifyModule(*M, &ves)) {
+        fprintf(stderr, "IR verification failed:\n%s\n", ves.str().c_str());
+        return 1;
+    }
+    *out_ctx = ctx.release();
+    *out_mod = M.release();
     return 0;
 }
