@@ -37,6 +37,7 @@ Lex       Yacc/     作用域/    AST +         LLVM IR     llc → 原生
 | 12 | [Clang 架构与插件开发](docs/chapters/12-clang-ast.md) | Clang 前端架构、ASTMatcher、Plugin | 写一个简单的 Clang Plugin |
 | 13 | [JIT 与解释执行（可选）](docs/chapters/13-jit.md) | LLVM JIT、MCJIT、ORC | 用 ORC JIT 跑一个表达式 |
 | 14 | [期末项目](docs/chapters/14-project.md) | 综合：扩展 C1、添加 `for`/结构体/字符串 | 个人项目选题 |
+| 15 | [专题：用 Rust 实现外部 DSL](docs/chapters/15-rust-dsl.md) | logos/chumsky/ariadne、树遍历求值、错误恢复 | 规则引擎 `rule-dsl`（Rust） |
 
 ---
 
@@ -99,6 +100,8 @@ $ ./fib ; echo $?
 │   ├── expected/        # AST 期望输出
 │   └── e2e/             # 端到端期望退出码
 ├── examples/            # C1 示例程序
+├── rust/                # 第 15 章：Rust 专题（外部 DSL）
+│   └── rule-dsl/        #   规则引擎：logos + chumsky + ariadne
 ├── scripts/             # 构建/测试脚本
 └── build/               # 构建产物（git 忽略）
 ```
@@ -115,6 +118,7 @@ $ ./fib ; echo $?
 | `c1c_jit` | ✅ | 第 13 章 | ORC LLJIT：IR 不落盘，进程内直接执行 main（需 llvm-18-dev） |
 | `constfold.so` | ✅ | 第 11 章 | 自研常量折叠 Pass 插件，`opt -load-pass-plugin` 加载，与 LLVM pass 组合流水线 |
 | `unused-vars.so` | ✅ | 第 12 章 | Clang 插件：告警从未引用的局部变量，`clang -fplugin` 加载（需 libclang-cpp-18-dev） |
+| `rule-dsl` | ✅ | 第 15 章 | Rust 外部 DSL：规则引擎（logos 词法 + chumsky 语法/错误恢复 + ariadne 诊断 + 树遍历执行），`cargo run -- rules/orders.rules facts/vip-big.json`（需 Rust 工具链） |
 
 跑测试：
 

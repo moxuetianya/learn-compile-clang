@@ -13,3 +13,6 @@ build/
 # 测试临时文件
 /tmp/
 *.tmp
+
+# Rust（第 15 章）
+target/

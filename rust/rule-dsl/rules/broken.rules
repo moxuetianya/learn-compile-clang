@@ -1,0 +1,18 @@
+# 这个文件故意写错了两处，用来演示：
+# 1. 错误恢复 —— 坏规则不拖垮整个文件，好规则照常解析、执行
+# 2. ariadne 的源码定位输出（一次报告多个错误）
+
+rule "好规则1" when true then end
+
+rule "缺优先级数字" priority when true then end
+#                   ↑ priority 后面少了个整数
+
+rule "好规则2" when 1 + 2 * 3 < 10 then end
+
+rule "缺右括号" when order.amount > 100 then
+    set order.discount = 0.1;
+    log("测试";
+end
+#  ↑ log 的右括号丢了
+
+rule "好规则3" when true then end

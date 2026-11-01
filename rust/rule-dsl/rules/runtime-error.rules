@@ -1,0 +1,11 @@
+# 运行期错误演示：when 里引用了 facts 里不存在的事实路径
+
+rule "引用了不存在的字段" priority 5
+when order.nonexistent > 100
+then
+    set order.discount = 0;
+end
+
+rule "正常规则" when true then
+    set order.ok = true;
+end

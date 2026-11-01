@@ -1,0 +1,38 @@
+# 订单促销与风控规则集
+# 优先级越大越先执行；同优先级按书写顺序。
+# 前面规则 set 进去的值，后面的规则能看到（会互相影响，见 15.6 节）。
+
+rule "黑名单用户直接拒绝" priority 100
+when user.blacklisted == true
+then
+    reject("user is blacklisted");
+end
+
+rule "VIP 大额订单" priority 10
+when order.amount > 1000 && user.vip == true && order.items >= 5
+then
+    set order.discount = 0.15;
+    set order.tag = "vip-big";
+    log("vip 大额折扣生效，订单金额=", order.amount);
+end
+
+rule "普通满减" priority 5
+when order.amount >= 200 && order.discount == 0
+then
+    set order.discount = 0.05;
+    log("普通满减生效");
+end
+
+rule "小额订单免运费" priority 2
+when order.amount < 50
+then
+    set order.shipping = 0;
+    log("小额免运费");
+end
+
+rule "标准运费" priority 1
+when order.amount >= 50 && !user.vip
+then
+    # 运费按金额 1% 收，VIP 免运费
+    set order.shipping = order.amount * 0.01;
+end

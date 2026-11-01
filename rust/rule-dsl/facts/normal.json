@@ -1,0 +1,4 @@
+{
+  "user": { "name": "Bob", "vip": false, "blacklisted": false },
+  "order": { "id": "B-2002", "amount": 320.0, "items": 2, "discount": 0 }
+}
